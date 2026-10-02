@@ -1,0 +1,18 @@
+# Mail
+imap-tools>=1.7
+
+# CV -> text (PDF, DOCX, images, OCR)
+docling>=2.30
+
+# LLM structured output
+instructor>=1.17
+pydantic>=2.6
+anthropic>=0.40
+google-genai>=1.0
+
+# Storage
+pandas>=2.1
+openpyxl>=3.1
+
+# Config
+python-dotenv>=1.0
