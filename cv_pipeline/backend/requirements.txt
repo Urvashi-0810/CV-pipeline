@@ -1,0 +1,30 @@
+# Mail
+imap-tools>=1.7
+
+# Reading files (resumes are parsed by the LLM; these only pull plain text out of DOCX / JD PDFs)
+python-docx>=1.1
+pypdfium2>=4.30
+# Optional Docling mode (CV_PARSER=docling): pip install -r requirements-docling.txt
+
+# LLM structured output
+instructor[anthropic,google-genai]>=1.17   # extras pull in jsonref etc. needed for Gemini
+pydantic>=2.6
+anthropic>=0.40
+google-genai>=1.0
+
+# Storage
+pandas>=2.1
+openpyxl>=3.1
+
+# Config
+python-dotenv>=1.0
+
+# API (for the React frontend)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+
+# Tests (optional)
+pytest>=8
+httpx>=0.27
+reportlab>=4
