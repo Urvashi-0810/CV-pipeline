@@ -56,9 +56,27 @@ class LLM:
             if not settings.gemini_api_key:
                 raise RuntimeError("GEMINI_API_KEY missing in .env")
             from google import genai
+            from google.genai import types
+
             self.model = settings.gemini_model
+
+            # Retry transient Gemini/API overload errors (including HTTP 503)
+            # with exponential backoff. "attempts" includes the initial request.
+            gemini_client = genai.Client(
+                api_key=settings.gemini_api_key,
+                http_options=types.HttpOptions(
+                    retry_options=types.HttpRetryOptions(
+                        attempts=5,
+                        initial_delay=2.0,
+                        exp_base=2.0,
+                        max_delay=60.0,
+                        jitter=1.0,
+                        http_status_codes=[408, 429, 500, 502, 503, 504],
+                    )
+                ),
+            )
             self.client = instructor.from_genai(
-                genai.Client(api_key=settings.gemini_api_key), mode=instructor.Mode.JSON
+                gemini_client, mode=instructor.Mode.JSON
             )
 
     def extract(
