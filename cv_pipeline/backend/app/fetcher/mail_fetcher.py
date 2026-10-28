@@ -378,35 +378,72 @@ def _convert_attachment_to_pdf(att, work_dir: Path, index: int) -> Path:
             image.save(pdf_path, "PDF", resolution=150.0)
         return pdf_path
 
+    
     if extension in {".doc", ".docx", ".odt", ".rtf"}:
+        # First try Microsoft Word for formats it commonly supports.
+        # If Word fails, fall back to LibreOffice.
+        converted = work_dir / f"{source_path.stem}.pdf"
+        word_error = None
+
+        if extension in {".doc", ".docx", ".rtf", ".odt"}:
+            try:
+                return _convert_with_word(source_path, converted)
+            except Exception as exc:
+                word_error = exc
+                log.warning(
+                    "Word conversion failed for %s; trying LibreOffice. Error: %s",
+                    filename,
+                    exc,
+                )
+
         office = find_libreoffice()
         if not office:
             raise RuntimeError(
-                f"Cannot convert {filename}: LibreOffice was not found. Install it or add "
-                "C:\\Program Files\\LibreOffice\\program to PATH."
+                f"Word and LibreOffice conversion unavailable for {filename}. "
+                f"Word error: {word_error}"
             )
-        # Isolate the LibreOffice profile to avoid lock conflicts during repeated runs.
+
         profile_dir = work_dir / f"lo_profile_{index}"
         profile_dir.mkdir(parents=True, exist_ok=True)
-        completed = subprocess.run(
-            [
-                office,
-                f"-env:UserInstallation={profile_dir.as_uri()}",
-                "--headless",
-                "--convert-to", "pdf",
-                "--outdir", str(work_dir),
-                str(source_path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
-        )
-        converted = work_dir / f"{source_path.stem}.pdf"
-        if completed.returncode != 0 or not converted.exists():
-            details = (completed.stderr or completed.stdout or "No details returned").strip()
-            raise RuntimeError(f"LibreOffice conversion failed for {filename}: {details}")
-        return converted
+
+        try:
+            completed = subprocess.run(
+                [
+                    office,
+                    f"-env:UserInstallation={profile_dir.as_uri()}",
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(work_dir),
+                    str(source_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+            )
+
+            if (
+                completed.returncode == 0
+                and converted.exists()
+                and converted.stat().st_size > 0
+            ):
+                log.info("LibreOffice conversion successful: %s", converted)
+                return converted
+
+            details = (
+                completed.stderr or completed.stdout or "No details returned"
+            ).strip()
+
+            raise RuntimeError(
+                f"LibreOffice conversion failed for {filename}: "
+                f"returncode={completed.returncode}; details={details}"
+            ) from word_error
+
+        except Exception:
+            converted.unlink(missing_ok=True)
+            raise
 
     raise ValueError(
         f"Unsupported attachment type for PDF conversion: {filename} ({extension or 'no extension'})"
@@ -521,6 +558,72 @@ def _merge_attachments_to_pdf(attachments, output_path: Path) -> None:
             exc,
         )
 
+
+def _convert_with_word(source_path: Path, output_pdf: Path) -> Path:
+    """Convert a Word document to PDF using Microsoft Word COM."""
+    import logging
+    import pythoncom
+    import win32com.client
+
+    log = logging.getLogger("fetcher")
+    word = None
+    doc = None
+
+    try:
+        pythoncom.CoInitialize()
+
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = 0
+
+        log.info("Microsoft Word conversion started: %s", source_path.name)
+
+        # OpenAndRepair=True asks Word to recover damaged documents.
+        doc = word.Documents.Open(
+            FileName=str(source_path.resolve()),
+            ConfirmConversions=False,
+            ReadOnly=True,
+            AddToRecentFiles=False,
+            OpenAndRepair=True,
+            NoEncodingDialog=True,
+            Visible=False,
+        )
+
+        # 17 is Word's PDF format.
+        doc.SaveAs2(
+            FileName=str(output_pdf.resolve()),
+            FileFormat=17,
+            AddToRecentFiles=False,
+        )
+
+        if not output_pdf.exists() or output_pdf.stat().st_size == 0:
+            raise RuntimeError("Word did not create a valid PDF output file.")
+
+        log.info("Microsoft Word conversion successful: %s", output_pdf)
+        return output_pdf
+
+    except Exception:
+        output_pdf.unlink(missing_ok=True)
+        log.exception("Microsoft Word conversion failed: %s", source_path.name)
+        raise
+
+    finally:
+        if doc is not None:
+            try:
+                doc.Close(SaveChanges=False)
+            except Exception:
+                log.warning("Could not close Word document: %s", source_path.name)
+
+        if word is not None:
+            try:
+                word.Quit()
+            except Exception:
+                log.warning("Could not close Microsoft Word cleanly.")
+
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
 
 class MailFetcher:
     def __init__(self):
