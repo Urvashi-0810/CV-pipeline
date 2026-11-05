@@ -6,8 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from imap_tools import AND, MailBox
 from imap_tools import U as UidRange
-import imaplib
-import time
+from app.llm.client import get_llm
 import shutil
 import subprocess
 import tempfile
@@ -173,51 +172,6 @@ def _safe_subject(
         subject += "..."
     return subject or "No Subject"
 
-    """
-    Convert email subject into a short, safe Windows folder name.
-    Examples:
-        "RE: Urgent Requirement for Senior Java Developer"
-            -> "Urgent Requirement for Senior Java Developer"
-        Very long subjects are truncated to max_length.
-    Args:
-        subject: Original email subject
-        max_length: Maximum subject length
-    Returns:
-        Sanitized and shortened subject.
-    """
-
-    if not subject:
-        return "No Subject"
-
-    # Convert to string
-    subject = str(subject).strip()
-
-    # Remove common email prefixes
-    subject = re.sub(r"^(re|fw|fwd)\s*:\s*","", subject, flags=re.IGNORECASE,).strip()
-
-    # Remove Windows-invalid characters
-    subject = re.sub(r'[<>:"/\\|?*\r\n\t]+', "_",subject,)
-
-    # Replace multiple spaces/underscores
-
-    subject = re.sub(r"\s+", " ", subject)
-    subject = re.sub(r"_+", "_", subject)
-
-    # Remove unwanted characters from beginning/end
-    subject = subject.strip(" ._")
-
-    if not subject:
-        return "No Subject"
-
-    # Shorten the subject
-    if len(subject) > max_length:
-        subject = subject[:max_length].rstrip(" ._-")
-
-        # Add indication that it was shortened
-        subject = subject + "..."
-
-    return subject or "No Subject"
-
 
 def _safe_sender_email(sender: str | None) -> str:
     """
@@ -286,20 +240,67 @@ def _mail_matches_filters(msg) -> bool:
 # Attachment filters
 # ============================================================
 
+def _get_attachment_extension(att) -> str:
+    """Determine attachment extension from filename, MIME type, or file signature."""
+    filename = (getattr(att, "filename", None) or "").strip()
+    extension = Path(filename).suffix.lower()
+
+    # Missing extension or filename ending with a dot.
+    if extension and extension != ".":
+        return extension
+
+    content_type = (
+        getattr(att, "content_type", None) or ""
+    ).lower().split(";")[0].strip()
+
+    mime_extensions = {
+        "application/pdf": ".pdf",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/bmp": ".bmp",
+        "image/tiff": ".tiff",
+        "image/webp": ".webp",
+        "application/msword": ".doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/rtf": ".rtf",
+        "text/rtf": ".rtf",
+        "application/vnd.oasis.opendocument.text": ".odt",
+    }
+
+    if content_type in mime_extensions:
+        return mime_extensions[content_type]
+
+    # Fall back to checking file signatures.
+    payload = getattr(att, "payload", None) or b""
+
+    if payload.startswith(b"%PDF-"):
+        return ".pdf"
+    if payload.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+
+    return ""
 
 def _is_cv_attachment(att) -> bool:
-    """
-    Return True if attachment looks like a CV.
-    """
+    """Return True if attachment is a supported CV or supporting document."""
 
-    filename = att.filename or ""
-    extension = Path(filename).suffix.lower()
+    filename = getattr(att, "filename", None) or "unknown"
+    extension = _get_attachment_extension(att)
+
     if extension not in CV_EXTENSIONS:
+        log.info(
+            "Skipping unsupported attachment: %s | extension=%r | MIME=%r",
+            filename,
+            extension,
+            getattr(att, "content_type", None),
+        )
         return False
 
+    size = len(getattr(att, "payload", None) or b"")
 
-    # Maximum attachment size
-    if att.size > (settings.max_attachment_mb* 1024* 1024):
+    if size > settings.max_attachment_mb * 1024 * 1024:
         log.warning(
             "Skipping %s: larger than %s MB",
             filename,
@@ -307,13 +308,17 @@ def _is_cv_attachment(att) -> bool:
         )
         return False
 
-    # Ignore small/inline images
     if extension in IMAGE_EXTENSIONS:
-        disposition = (att.content_disposition or "").lower()
+        disposition = (
+            getattr(att, "content_disposition", None) or ""
+        ).lower()
+
         if disposition == "inline":
             return False
-        if att.size < MIN_IMAGE_BYTES:
+
+        if size < MIN_IMAGE_BYTES:
             return False
+
     return True
 
 
@@ -339,8 +344,13 @@ def find_libreoffice() -> str | None:
 def _convert_attachment_to_pdf(att, work_dir: Path, index: int) -> Path:
     """Convert one supported attachment to a temporary PDF without downsampling images."""
     filename = att.filename or f"attachment_{index}"
-    extension = Path(filename).suffix.lower()
+    extension = _get_attachment_extension(att)
     payload = att.payload
+
+    if not extension:
+        raise ValueError(
+            f"Cannot determine attachment type: {filename}"
+        )
     if not payload:
         raise ValueError(f"Attachment is empty: {filename}")
 
@@ -546,7 +556,6 @@ def _merge_attachments_to_pdf(attachments, output_path: Path) -> None:
             temporary_output.replace(output_path)
         finally:
             temporary_output.unlink(missing_ok=True)
-
     # Compress only after every attachment has been converted/merged.
     try:
         _compress_pdf_lossless(output_path)
@@ -815,84 +824,6 @@ class MailFetcher:
                     "Fetch progress saved. Last UID=%d",
                     result.last_uid,
                 )
-
-                # Extract only files created during this batch.
-                newly_saved_files = list(
-                    dict.fromkeys(result.saved_files[saved_files_before:])
-                )
-
-                if newly_saved_files:
-                    try:
-                        from app.extractor.cv_extractor import run_extraction
-
-                        extraction_result = run_extraction(
-                            provider=settings.llm_provider,
-                            only_paths=newly_saved_files,
-                        )
-
-                        log.info(
-                            "Batch extraction completed: found=%s, extracted=%s, "
-                            "skipped=%s, failed=%s",
-                            getattr(extraction_result, "found", "unknown"),
-                            getattr(extraction_result, "extracted", "unknown"),
-                            getattr(
-                                extraction_result,
-                                "skipped_already_done",
-                                "unknown",
-                            ),
-                            getattr(extraction_result, "failed", "unknown"),
-                        )
-
-                        for filename, error in getattr(
-                            extraction_result, "errors", {}
-                        ).items():
-                            log.error(
-                                "Extraction failed for %s: %s",
-                                filename,
-                                error,
-                            )
-
-                    except Exception:
-                        log.exception(
-                            "Extraction failed for batch %d-%d.",
-                            batch_start,
-                            batch_end,
-                        )
-
-                else:
-                    log.info(
-                        "No new PDFs created in batch %d-%d; skipping extraction.",
-                        batch_start,
-                        batch_end,
-                    )
-
-                # Persist state after extraction.
-                self._save_state(uidvalidity, result)
-
-                log.info(
-                    "Batch %d-%d processing finished.",
-                    batch_start,
-                    batch_end,
-                )  
-
-                if not batch_success:
-                    log.warning(
-                        "Batch %d-%d was not completed successfully. "
-                        "Continuing with next batch.",
-                        batch_start,
-                        batch_end,
-                    )
-                else:
-                    log.info(
-                        "Progress saved after batch %d-%d. Last UID=%d",
-                        batch_start,
-                        batch_end,
-                        result.last_uid,
-                    )
-                log.info(
-						"Fetch progress saved. Last UID=%d",
-						result.last_uid,
-					)
                 # Extract and upload only PDFs created during this batch.
                 newly_saved_files = list(dict.fromkeys(result.saved_files[saved_files_before:]))
                 if newly_saved_files:
@@ -1024,14 +955,25 @@ class MailFetcher:
             return
 
         cv_attachments = []
+
         for att in msg.attachments:
             try:
-                if _is_cv_attachment(att):
+                selected = _is_cv_attachment(att)
+
+                log.info(
+                    "Attachment selection | filename=%r | extension=%s | selected=%s",
+                    getattr(att, "filename", None),
+                    _get_attachment_extension(att),
+                    selected,
+                )
+
+                if selected:
                     cv_attachments.append(att)
-            except Exception as exc:
-                log.warning(
-                    "Could not inspect attachment %s: %s",
-                    getattr(att, "filename", "unknown"), exc,
+
+            except Exception:
+                log.exception(
+                    "Attachment filtering failed: %r",
+                    getattr(att, "filename", None),
                 )
 
         if not cv_attachments:
