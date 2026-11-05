@@ -47,6 +47,7 @@ class Settings:
     imap_password: str = field(default_factory=lambda: os.getenv("IMAP_PASSWORD", ""))
     imap_folder: str = field(default_factory=lambda: os.getenv("IMAP_FOLDER", "INBOX"))
     fetch_since_date: str = field(default_factory=lambda: os.getenv("FETCH_SINCE_DATE", "").strip())
+    fetch_until_date: str = field(default_factory=lambda: os.getenv("FETCH_UNTIL_DATE", "").strip())
     subject_keywords: list[str] = field(default_factory=lambda: _csv("SUBJECT_KEYWORDS"))
     from_filter: list[str] = field(default_factory=lambda: _csv("FROM_FILTER"))
     max_attachment_mb: float = field(default_factory=lambda: float(os.getenv("MAX_ATTACHMENT_MB", "15")))

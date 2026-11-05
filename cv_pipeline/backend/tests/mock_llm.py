@@ -18,6 +18,7 @@ from google.genai import types as gt
 SENT = []
 
 CANDIDATE = {"full_name": "Rahul Sharma", "email": "rahul.sharma@example.com", "phone": "+91 98765 43210",
+             "passport_number": "P1234567",
              "skills": ["Python", "AWS", "Python"], "total_experience_years": 10.25,
              "education": [{"degree": "B.E. Computer", "institution": "Univ of Pune", "year": "2016", "score": "72%"}],
              "current_job_title": "Senior Software Engineer", "current_company": "Infosys",

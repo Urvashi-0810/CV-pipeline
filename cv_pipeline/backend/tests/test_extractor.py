@@ -69,6 +69,7 @@ def test_extract_to_excel_and_skip_on_rerun(parser_mode):
         assert set(methods.values()) <= {"docling", "docling+file"}
     assert len(df) == 2
     assert df.iloc[0]["Full Name"] == "Rahul Sharma"
+    assert df.iloc[0]["Passport Number"] == "P1234567"
     assert df.iloc[0]["Age"] == 32 or df.iloc[0]["Age"] == 33       # computed from DOB in Python
     assert "Python" in df.iloc[0]["Skills"] and df.iloc[0]["Skills"].count("Python") == 1
 

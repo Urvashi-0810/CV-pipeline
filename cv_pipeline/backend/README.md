@@ -243,7 +243,7 @@ For each file in `data/cvs/`:
 Any text that was sent (DOCX text) is cached in `data/state/text_cache/<hash>.md` for the job-fit step.
 
 ### Excel columns
-Full Name · Email · Phone · Skills · Experience (Years) · Education · Current/Last Job Title ·
+Full Name · Email · Phone · Passport Number · Skills · Experience (Years) · Education · Current/Last Job Title ·
 Current/Last Company · Age · Date of Birth · Certifications · Languages · Location · Summary ·
 CV File · Received From · Mail Subject · Mail Date · Extraction Method (llm-file/docx-text) · LLM ·
 Extracted At · File Hash

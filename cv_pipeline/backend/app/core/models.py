@@ -26,6 +26,10 @@ class Candidate(BaseModel):
     email: Optional[str] = Field(None, description="Primary email address")
     phone: Optional[str] = Field(None, description="Primary phone number with country code if present")
     skills: list[str] = Field(default_factory=list, description="Technical and professional skills, each as a short item (e.g. 'Python', 'SQL', 'Team leadership'). Deduplicated.")
+    passport_number: Optional[str] = Field(
+            None,
+            description="Passport number exactly as shown in the CV. Preserve letters, digits, and punctuation; null if not explicitly present. Do not substitute another identity number.",
+        )
     total_experience_years: Optional[float] = Field(
         None,
         description=(
