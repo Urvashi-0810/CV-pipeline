@@ -1,0 +1,4 @@
+# Optional: only needed when CV_PARSER=docling in .env
+# Docling converts CVs to Markdown locally (layout + OCR models, ~2-3 GB with PyTorch).
+-r requirements.txt
+docling>=2.30

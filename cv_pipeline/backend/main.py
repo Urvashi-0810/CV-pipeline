@@ -10,6 +10,17 @@ Command-line entry point.
     python main.py run                        # fetch + extract
     python main.py status                     # show progress / counts
     python main.py check                      # test .env, mail login and LLM keys
+
+    # --- Steps 3-4 work per JOB (one opening = one job folder in data/jobs/<slug>/)
+    python main.py job create "Python Developer" --jd jd.pdf      # or --jd-text "..."
+    python main.py job list
+    python main.py job show python-developer
+    python main.py requirements --job python-developer            # LLM: JD -> rubric (+ suggested criteria.json)
+    python main.py shortlist   --job python-developer             # STEP 3: rules from criteria.json
+    python main.py jobfit      --job python-developer             # STEP 4: LLM scores the shortlist
+    python main.py pipeline    --job python-developer             # requirements + shortlist + jobfit
+
+    python main.py serve                      # start the API for the React frontend (http://localhost:8000/docs)
 """
 from __future__ import annotations
 
@@ -83,8 +94,76 @@ def cmd_check(a):
     sys.exit(0 if ok else 1)
 
 
+# ------------------------------------------------------------------ Steps 3-4
+def cmd_job(a):
+    from app.jobs.job_store import Job, create_job, delete_job, list_jobs
+    if a.action == "create":
+        if not a.title:
+            raise ValueError('Give a title:  python main.py job create "Python Developer" --jd jd.pdf')
+        job = create_job(a.title, slug=a.slug, jd_text=a.jd_text, jd_file=a.jd)
+        print(f"Created job '{job.slug}' in {job.dir}")
+        print(f"Next: python main.py requirements --job {job.slug}")
+    elif a.action == "list":
+        for j in list_jobs():
+            print(f"{j['slug']:30} {j['title']:30} jd={j['has_jd']} req={j['has_requirements']} "
+                  f"shortlist={j['has_shortlist']} jobfit={j['has_jobfit']}")
+    elif a.action == "show":
+        job = Job(a.title or a.slug or "").require()
+        print(json.dumps(job.summary(), indent=2))
+        req = job.load_requirements()
+        if req:
+            print("\nRequirements:")
+            for r in req.requirements:
+                print(f"  [{r.importance:4}] ({r.category}) {r.criterion}")
+        print("\nCriteria:", job.load_criteria().model_dump_json(indent=2, exclude_defaults=True))
+    elif a.action == "delete":
+        delete_job(a.title or a.slug)
+        print("deleted")
+
+
+def cmd_requirements(a):
+    from app.jobfit.requirements import prepare_job
+    r = prepare_job(a.job, a.provider, a.force, a.overwrite_criteria)
+    print("Requirements taken from the JD:")
+    for x in r["requirements"]["requirements"]:
+        print(f"  [{x['importance']:4}] ({x['category']}) {x['criterion']:35}  <- \"{x['jd_quote']}\"")
+    if r["dropped_not_in_jd"]:
+        print("\nDropped (LLM added these but they are not in the JD):")
+        for d in r["dropped_not_in_jd"]:
+            print(f"  - {d['criterion']}  ({d['reason']})")
+    print("\ncriteria.json", "written from the JD's values" if r["criteria_written"] else "kept (already customised)")
+    print("Review/edit data/jobs/<job>/criteria.json, then: python main.py shortlist --job", a.job)
+
+
+def cmd_shortlist(a):
+    from app.shortlist.shortlister import run_shortlist
+    print(json.dumps(run_shortlist(a.job), indent=2))
+
+
+def cmd_jobfit(a):
+    from app.jobfit.jobfit import ranked_results, run_jobfit
+    r = run_jobfit(a.job, provider=a.provider, force=a.force, workers=a.workers, limit=a.limit)
+    print(json.dumps(r, indent=2))
+    print("\nTop candidates:")
+    for i, c in enumerate(ranked_results(a.job)[:10], 1):
+        print(f"  {i:2}. {str(c['name']):28} {c['fit_score']:3}  {c['recommendation']}")
+
+
+def cmd_pipeline(a):
+    from app.jobfit.requirements import prepare_job
+    prepare_job(a.job, a.provider)
+    cmd_shortlist(a)
+    cmd_jobfit(a)
+
+
+def cmd_serve(a):
+    import uvicorn
+    print(f"API docs: http://{a.host}:{a.port}/docs")
+    uvicorn.run("app.api.main:app", host=a.host, port=a.port, reload=a.reload)
+
+
 def main():
-    p = argparse.ArgumentParser(description="CV pipeline - Part 1 (fetch + extract)")
+    p = argparse.ArgumentParser(description="CV pipeline: fetch -> extract -> shortlist -> job fit")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     f = sub.add_parser("fetch", help="download new CV attachments from mail")
@@ -111,6 +190,46 @@ def main():
     c = sub.add_parser("check", help="verify .env, mail login, LLM keys")
     c.add_argument("--provider", choices=["claude", "gemini"])
     c.set_defaults(func=cmd_check)
+
+    j = sub.add_parser("job", help="create/list/show/delete jobs (job descriptions)")
+    j.add_argument("action", choices=["create", "list", "show", "delete"])
+    j.add_argument("title", nargs="?", help="job title (create) or slug (show/delete)")
+    j.add_argument("--slug", help="folder id (default: from title)")
+    j.add_argument("--jd", help="JD file: .pdf/.docx/.txt/.md")
+    j.add_argument("--jd-text", help="JD as text")
+    j.set_defaults(func=cmd_job)
+
+    q = sub.add_parser("requirements", help="LLM structures the JD into requirements (JD text only) + criteria")
+    q.add_argument("--job", required=True)
+    q.add_argument("--provider", choices=["claude", "gemini"])
+    q.add_argument("--force", action="store_true", help="regenerate even if cached")
+    q.add_argument("--overwrite-criteria", action="store_true", help="replace criteria.json with suggestion")
+    q.set_defaults(func=cmd_requirements)
+
+    s = sub.add_parser("shortlist", help="STEP 3: apply criteria.json to the Excel")
+    s.add_argument("--job", required=True)
+    s.set_defaults(func=cmd_shortlist)
+
+    def add_fit_args(sp):
+        sp.add_argument("--job", required=True)
+        sp.add_argument("--provider", choices=["claude", "gemini"])
+        sp.add_argument("--force", action="store_true", help="re-score everyone (ignore cache)")
+        sp.add_argument("--workers", type=int, help="parallel LLM calls (default JOBFIT_WORKERS)")
+        sp.add_argument("--limit", type=int, help="score at most N candidates this run")
+
+    jf = sub.add_parser("jobfit", help="STEP 4: LLM job-fit scoring of the shortlist")
+    add_fit_args(jf)
+    jf.set_defaults(func=cmd_jobfit)
+
+    pl = sub.add_parser("pipeline", help="requirements + shortlist + jobfit for a job")
+    add_fit_args(pl)
+    pl.set_defaults(func=cmd_pipeline)
+
+    sv = sub.add_parser("serve", help="start the API server")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.add_argument("--reload", action="store_true", help="auto-restart on code changes (dev)")
+    sv.set_defaults(func=cmd_serve)
 
     a = p.parse_args()
     try:

@@ -20,6 +20,15 @@ Skills: Python, Django, AWS, Docker. Education: B.E. Computer Engineering, Unive
 Languages: English, Hindi. Certifications: AWS Solutions Architect. """ * 2
 
 
+@pytest.fixture(autouse=True, params=["llm", "docling"])
+def parser_mode(request, monkeypatch):
+    """Every test runs twice: CV_PARSER=llm (default) and CV_PARSER=docling."""
+    if request.param == "docling":
+        pytest.importorskip("docling")
+    monkeypatch.setattr(settings, "cv_parser", request.param)
+    return request.param
+
+
 @pytest.fixture(autouse=True)
 def clean():
     for d in (settings.cv_folder, settings.state_folder, settings.output_excel.parent):
@@ -42,16 +51,25 @@ def make_docx(path):
     d = Document(); d.add_paragraph(CV_TEXT); d.save(path)
 
 
-def test_extract_to_excel_and_skip_on_rerun():
+def test_extract_to_excel_and_skip_on_rerun(parser_mode):
     make_pdf(settings.cv_folder / "rahul.pdf")
     make_docx(settings.cv_folder / "rahul2.docx")
     (settings.cv_folder / "ignore.txt").write_text("not a cv")
 
+    mock_llm.SENT.clear()
     r = cv_extractor.run_extraction()
     assert r.found == 2 and r.extracted == 2 and r.failed == 0, r.errors
     df = load_candidates()
+    methods = dict(zip(df["CV File"], df["Extraction Method"]))
+    if parser_mode == "llm":
+        assert methods == {"rahul.pdf": "llm-file", "rahul2.docx": "docx-text"}
+        pdf_call = [kw for _, kw in mock_llm.SENT if "document" in str(kw["messages"])]
+        assert pdf_call, "the PDF itself should be sent to the LLM"
+    else:
+        assert set(methods.values()) <= {"docling", "docling+file"}
     assert len(df) == 2
     assert df.iloc[0]["Full Name"] == "Rahul Sharma"
+    assert df.iloc[0]["Passport Number"] == "P1234567"
     assert df.iloc[0]["Age"] == 32 or df.iloc[0]["Age"] == 33       # computed from DOB in Python
     assert "Python" in df.iloc[0]["Skills"] and df.iloc[0]["Skills"].count("Python") == 1
 
@@ -65,14 +83,14 @@ def test_extract_to_excel_and_skip_on_rerun():
 
 
 def test_image_cv_is_extracted():
-    """Image CV: Docling OCR text if available, otherwise LLM vision fallback."""
+    """Image CV: sent to the LLM directly (llm mode) or via Docling OCR / file fallback."""
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (1000, 400), "white")
     ImageDraw.Draw(img).text((20, 20), "Rahul Sharma - Python developer", fill="black")
     img.save(settings.cv_folder / "scan.png")
     r = cv_extractor.run_extraction()
     assert r.extracted == 1, r.errors
-    assert load_candidates().iloc[0]["Extraction Method"] in ("text", "vision")
+    assert load_candidates().iloc[0]["Extraction Method"] in ("llm-file", "docling", "docling+file")
 
 
 def test_bad_file_does_not_stop_batch():
