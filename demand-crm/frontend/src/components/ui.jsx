@@ -95,7 +95,7 @@ export function formatDate(value) {
   return value ? dayFormat.format(new Date(value)) : '—'
 }
 
-export function Drawer({ title, subtitle, onClose, children, footer }) {
+export function Drawer({ title, subtitle, onClose, children, footer, className = '' }) {
   useEffect(() => {
     const onKey = (e) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
@@ -103,7 +103,7 @@ export function Drawer({ title, subtitle, onClose, children, footer }) {
   }, [onClose])
   return (
     <div className="drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <aside className="drawer" role="dialog" aria-modal="true" aria-label={title}>
+      <aside className={`drawer ${className}`.trim()} role="dialog" aria-modal="true" aria-label={title}>
         <header className="drawer-header">
           <div>
             <h2>{title}</h2>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import re
 from pypdf.errors import DependencyError
+from typing import Callable, Optional
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ import tempfile
 import re
 from pathlib import Path
 
+from app.core.control import RunCancelled, checkpoint, was_paused
 from app.core.config import (
 
     CV_EXTENSIONS,
@@ -50,6 +52,16 @@ class FetchResult:
     duplicates_skipped: int = 0
     last_uid: int = 0
     saved_files: list[str] = field(default_factory=list)
+    mails_to_scan: int = 0
+    # Fetch extracts each batch as it goes; these add up those extractions.
+    cvs_extracted: int = 0
+    cvs_failed: int = 0
+    cvs_skipped_already_done: int = 0
+    extraction_errors: dict[str, str] = field(default_factory=dict)
+    # Set when a batch failed and the fetch stopped there. The next fetch carries on from that point.
+    stopped_early: Optional[str] = None
+    # Stopped by Cancel. Progress is saved up to the last full batch; the next fetch carries on.
+    cancelled: bool = False
 
     def as_dict(self) -> dict:
         return self.__dict__.copy()
@@ -688,7 +700,8 @@ class MailFetcher:
     # Public method
     # ========================================================
 
-    def run(self,reset: bool = False,) -> FetchResult:
+    def run(self, reset: bool = False, progress: Optional[Callable[[int, int, str], None]] = None) -> FetchResult:
+        report = progress or (lambda *_: None)
         if not settings.imap_user or not settings.imap_password:
             raise RuntimeError("IMAP_USER / IMAP_PASSWORD missing in .env")
         result = FetchResult()
@@ -733,11 +746,23 @@ class MailFetcher:
                 uids = [uid for uid in uids if uid > last_uid]
 
             log.info("%d mail(s) to scan", len(uids))
+            result.mails_to_scan = len(uids)
+            report(0, len(uids), "Scanning mail")
             if not uids:
                 log.info("No new matching emails found.")
                 self._save_state(uidvalidity, result)
                 return result
             for i in range(0, len(uids), BATCH_SIZE):
+                # Between batches is a safe point: Pause waits here, Cancel stops here.
+                try:
+                    checkpoint()
+                except RunCancelled:
+                    result.cancelled = True
+                    break
+                if was_paused():
+                    # The mail connection may have dropped while paused: start a fresh one.
+                    self._close_mailbox(mb)
+                    mb = self._connect_mailbox()
                 batch = uids[i:i + BATCH_SIZE]
                 batch_start = i + 1
                 batch_end = min(i + BATCH_SIZE, len(uids))
@@ -784,6 +809,7 @@ class MailFetcher:
                             )
 
                         result.mails_scanned += 1
+                        report(result.mails_scanned, len(uids), f"Scanning mail {result.mails_scanned} of {len(uids)}")
                         batch_last_uid = max(
                             batch_last_uid,
                             int(msg.uid),
@@ -805,6 +831,7 @@ class MailFetcher:
                         exc,
                     )
 
+                    result.stopped_early = f"Mail batch {batch_start}-{batch_end} failed: {exc}"
                     # Do not continue making IMAP requests after a connection failure.
                     self._close_mailbox(mb)
                     mb = None
@@ -836,10 +863,23 @@ class MailFetcher:
                     try:
 						# Local import avoids a module-level circular import.
                         from app.extractor.cv_extractor import run_extraction
+                        def extraction_progress(done, total, current, _start=batch_start, _end=batch_end):
+                            # The bar counts mails; the label says which CV is being extracted.
+                            if current and current != "done":
+                                report(result.mails_scanned, len(uids),
+                                       f"Extracting CVs from mails {_start}-{_end}: {current} ({done + 1} of {total})")
+
                         extraction_result = run_extraction(
-							provider=settings.llm_provider,
-							only_paths=newly_saved_files,
-						)
+                            provider=settings.llm_provider,
+                            only_paths=newly_saved_files,
+                            progress=extraction_progress,
+                        )
+                        result.cvs_extracted += extraction_result.extracted
+                        result.cvs_failed += extraction_result.failed
+                        result.cvs_skipped_already_done += extraction_result.skipped_already_done
+                        result.extraction_errors.update(extraction_result.errors)
+                        if extraction_result.cancelled:
+                            result.cancelled = True
                         log.info(
 						"Batch extraction completed: found=%s, "
 						"extracted=%s, skipped=%s, failed=%s",
@@ -860,13 +900,17 @@ class MailFetcher:
                                     filename,
                                     error,
                                 )
-                    except Exception:
+                    except Exception as exc:
+                        result.extraction_errors[f"mails {batch_start}-{batch_end}"] = str(exc)[:500]
                         log.exception(
 								"Extraction failed for batch %d-%d. "
 								"Email fetching will continue with the next batch.",
 								batch_start,
 								batch_end,
 							)
+                    # Extraction updates file paths in the manifest after renaming. Reload it,
+                    # or the next save writes this fetcher's stale copy back over those paths.
+                    self.manifest = JsonState(settings.state_folder / "attachments_manifest.json")
                 else:
                     log.info(
 						"No new PDF files created in batch %d-%d; "
@@ -1060,11 +1104,12 @@ class MailFetcher:
 
 def fetch_cvs(
     reset: bool = False,
+    progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> FetchResult:
     """
-    Convenience function used by main.py / FastAPI.
+    Convenience function used by main.py / FastAPI. progress(done, total, current) counts mails.
     """
-    return MailFetcher().run(reset=reset)
+    return MailFetcher().run(reset=reset, progress=progress)
 
 
 def list_cv_files(folder: Path) -> list[Path]:

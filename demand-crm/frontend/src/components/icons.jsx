@@ -61,6 +61,22 @@ export const UserIcon = () => (
   </svg>
 )
 
+export const UsersIcon = () => (
+  <svg {...base}>
+    <circle cx="9" cy="8" r="3.5" />
+    <path d="M2.5 20a6.5 6.5 0 0 1 13 0" />
+    <path d="M16 4.5a3.5 3.5 0 0 1 0 7" />
+    <path d="M18.5 20a6.5 6.5 0 0 0-2.5-5.1" />
+  </svg>
+)
+
+export const ColumnsIcon = () => (
+  <svg {...base}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M9 4v16M15 4v16" />
+  </svg>
+)
+
 export const ShieldIcon = () => (
   <svg {...base}>
     <path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z" />

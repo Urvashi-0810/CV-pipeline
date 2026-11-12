@@ -62,7 +62,8 @@ def test_extract_to_excel_and_skip_on_rerun(parser_mode):
     df = load_candidates()
     methods = dict(zip(df["CV File"], df["Extraction Method"]))
     if parser_mode == "llm":
-        assert methods == {"rahul.pdf": "llm-file", "rahul2.docx": "docx-text"}
+        assert methods == {"Senior_Software_Engineer_P1234567_Rahul_Sharma.pdf": "llm-file",
+                           "Senior_Software_Engineer_P1234567_Rahul_Sharma_1.pdf": "docx-text"}
         pdf_call = [kw for _, kw in mock_llm.SENT if "document" in str(kw["messages"])]
         assert pdf_call, "the PDF itself should be sent to the LLM"
     else:

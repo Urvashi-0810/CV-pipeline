@@ -51,6 +51,10 @@ def _fmt_education(c: Candidate) -> str:
     return "; ".join(parts)
 
 
+def format_mail_date(mail_date: str | None) -> str | None:
+    return (mail_date or "")[:16].replace("T", " ") or None
+
+
 def candidate_to_row(c: Candidate, *, file_name: str, file_hash: str, mail_meta: dict,
                      method: str, provider: str) -> dict:
     return {
@@ -72,7 +76,7 @@ def candidate_to_row(c: Candidate, *, file_name: str, file_hash: str, mail_meta:
         "CV File": file_name,
         "Received From": mail_meta.get("from"),
         "Mail Subject": mail_meta.get("subject"),
-        "Mail Date": (mail_meta.get("mail_date") or "")[:16].replace("T", " ") or None,
+        "Mail Date": format_mail_date(mail_meta.get("mail_date")),
         "Extraction Method": method,
         "LLM": provider,
         "Extracted At": datetime.now().strftime("%Y-%m-%d %H:%M"),

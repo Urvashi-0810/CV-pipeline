@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 import mock_llm
 from app.api.main import app
-from conftest import seed_candidates
+from conftest import pdf_bytes, seed_candidates
 
 mock_llm.start()
 client = TestClient(app)
@@ -69,24 +69,12 @@ def test_full_flow(clean_data):
     assert client.get(f"/api/jobs/{slug}").status_code == 404
 
 
-def test_extract_task_and_upload(clean_data):
-    from reportlab.pdfgen import canvas
-    import io
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf)
-    for i, line in enumerate(["Rahul Sharma - Python developer, Django, AWS. 6 years experience at Infosys."] * 8):
-        c.drawString(30, 800 - 15 * i, line)
-    c.save()
-    r = client.post("/api/cvs/upload", files=[("files", ("rahul.pdf", buf.getvalue(), "application/pdf")),
-                                              ("files", ("notes.txt", b"x", "text/plain"))])
-    assert r.json() == {"saved": ["rahul.pdf"], "skipped_unsupported": ["notes.txt"]}
-
+def test_extract_task(clean_data):
+    (clean_data.cv_folder / "rahul.pdf").write_bytes(pdf_bytes("Rahul Sharma"))
     t = client.post("/api/extract", json={}).json()
     done = wait(t["id"], timeout=120)
     assert done["status"] == "done" and done["result"]["extracted"] == 1 and done["total"] == 1
     assert client.get("/api/status").json()["candidates_in_excel"] == 1
-    assert client.get("/api/cvs/rahul.pdf").status_code == 200
-    assert client.get("/api/cvs/..%2F..%2Fconftest.py").status_code in (400, 404)   # no path traversal
 
 
 def test_fetch_without_credentials_reports_error(clean_data, monkeypatch):

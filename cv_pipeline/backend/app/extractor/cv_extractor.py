@@ -4,18 +4,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 from app.core.config import CV_EXTENSIONS, settings
+from app.core.control import RunCancelled, checkpoint
 from app.core.logger import get_logger
 from app.core.models import Candidate
-from app.core.state import JsonState, file_sha256
+from app.core.state import JsonState, file_sha256, manifest_entry
 from app.extractor import converter
 from app.extractor.prompts import cv_extraction_system_prompt
 from app.llm.client import get_llm
 from app.storage.excel_store import candidate_to_row, load_candidates, upsert_rows
+from app.storage.s3_store import upload_cv_to_s3
 import re
 import time
 import traceback
-import os
-import boto3
 
 log = get_logger("extractor")
 
@@ -46,9 +46,62 @@ class ExtractResult:
     failed: int = 0
     total_rows_in_excel: int = 0
     errors: dict[str, str] = field(default_factory=dict)
+    # Per file hash: which candidate the CV joined and what it changed (talent database only)
+    placements: dict[str, dict] = field(default_factory=dict)
+    excel_note: Optional[str] = None
+    cancelled: bool = False          # stopped by Cancel; files not reached are done by the next Extract
 
     def as_dict(self) -> dict:
         return self.__dict__.copy()
+
+
+def _store_in_talent_db(candidate: Candidate, digest: str, final_path: Path, mail_meta: dict, method: str,
+                        provider_name: str, s3_uploaded: bool, education: Optional[str]) -> dict:
+    """Write one extracted CV to Postgres and run the matching rules. Raises on failure."""
+    from dataclasses import asdict
+    from datetime import timezone
+
+    from app.db.session import session_scope
+    from app.storage.s3_store import key_for, relative_cv_path
+    from app.talent.ingest import extracted_from_model, place_cv
+
+    relative_path = relative_cv_path(final_path)
+    manual = mail_meta.get("source") == "manual"
+    try:
+        mail_date = datetime.fromisoformat(mail_meta["mail_date"]) if mail_meta.get("mail_date") else None
+    except ValueError:
+        mail_date = None
+    now = datetime.now(timezone.utc)
+    parts = relative_path.split("/") if relative_path else []
+    document = {
+        "file_hash": digest, "file_name": final_path.name, "local_rel_path": relative_path,
+        "s3_key": key_for(relative_path) if relative_path else None,
+        "s3_status": "success" if s3_uploaded else "failed",
+        "source_type": "manual" if manual else "mail",
+        "mail_account": parts[0] if len(parts) > 1 and not manual else None,
+        "mail_from": mail_meta.get("from") or None, "mail_from_name": mail_meta.get("from_name") or None,
+        "mail_subject": mail_meta.get("subject") or None, "mail_date": mail_date,
+        # Newer means a later mail date; a manual upload counts from when it was uploaded.
+        "received_at": mail_date or now,
+        "extraction_method": method, "llm": provider_name, "extracted_at": now,
+    }
+    with session_scope() as session:
+        placement = place_cv(session, document, extracted_from_model(candidate, education))
+    return asdict(placement)
+
+
+def _refresh_excel(res: ExtractResult, rows: list[dict]) -> None:
+    """Rebuild the Excel from Postgres once per run. Never fails the run: the CVs are already stored."""
+    from app.talent.excel_export import ExcelNotMigrated, regenerate_excel
+    try:
+        regenerate_excel()
+    except ExcelNotMigrated as e:
+        # Before the historical backfill the Excel can't be rebuilt without losing rows: add to it instead.
+        upsert_rows(rows)
+        res.excel_note = f"Rows added to the existing Excel. {e}"
+    except Exception as e:  # noqa: BLE001 - e.g. the file is open in Excel
+        res.excel_note = f"The Excel was not updated: {e}"
+        log.error("Excel not updated: %s", e)
 
 
 def text_cache_dir() -> Path:
@@ -100,7 +153,8 @@ def run_extraction(
     """
     settings.ensure_dirs()
     processed = JsonState(settings.state_folder / "processed_files.json")
-    manifest = JsonState(settings.state_folder / "attachments_manifest.json").get("by_hash", {})
+    manifest_state = JsonState(settings.state_folder / "attachments_manifest.json")
+    manifest = manifest_state.get("by_hash", {})
     provider_name = (provider or settings.llm_provider).lower()
 
     if only_paths is not None:
@@ -118,9 +172,15 @@ def run_extraction(
     else:
         files = list_cv_files(settings.cv_folder)
     res = ExtractResult(found=len(files))
+    excel_rows: list[dict] = []
     log.info("Found %d CV file(s) in %s", len(files), settings.cv_folder)
 
     for i, path in enumerate(files, start=1):
+        try:
+            checkpoint()                 # Pause waits here; Cancel stops here, keeping the CVs already done
+        except RunCancelled:
+            res.cancelled = True
+            break
         if progress:
             progress(i - 1, len(files), path.name)
         if limit is not None and res.extracted >= limit:
@@ -138,6 +198,7 @@ def run_extraction(
 
             # Rename the merged PDF after candidate details are extracted.
             final_path = rename_cv_file(path, candidate)
+            _update_manifest_path(manifest_state, digest, final_path)
 
             if text:
                 (text_cache_dir() / f"{digest}.md").write_text(
@@ -148,7 +209,7 @@ def run_extraction(
                 candidate,
                 file_name=final_path.name,
                 file_hash=digest,
-                mail_meta=manifest.get(digest, {}),
+                mail_meta=manifest_entry(manifest, digest),
                 method=method,
                 provider=provider_name,
             )
@@ -161,8 +222,16 @@ def run_extraction(
                 "Success" if s3_uploaded else "Failed"
             )
 
-            # Save candidate details and S3 status to Excel
-            res.total_rows_in_excel = upsert_rows([row])
+            if settings.database_url:
+                # Postgres is the source of truth: store and match the CV before marking it done,
+                # so a database failure leaves it to be retried. The Excel is rebuilt after the run.
+                placement = _store_in_talent_db(candidate, digest, final_path, manifest_entry(manifest, digest),
+                                                method, provider_name, s3_uploaded, row["Education"])
+                res.placements[digest] = placement
+                excel_rows.append(row)
+            else:
+                # Save candidate details and S3 status to Excel
+                res.total_rows_in_excel = upsert_rows([row])
 
             # Save extraction and S3 status in processed_files.json
             processed.set(digest, {
@@ -191,6 +260,8 @@ def run_extraction(
         finally:
             processed.save()
 
+    if excel_rows:
+        _refresh_excel(res, excel_rows)
     if progress:
         progress(len(files), len(files), "done")
     res.total_rows_in_excel = len(load_candidates())
@@ -247,36 +318,15 @@ def rename_cv_file(path: Path, candidate: Candidate) -> Path:
     return new_path
 
 
-def upload_cv_to_s3(path: Path) -> bool:
-    """Upload the final, renamed PDF while preserving its local folder path."""
-
-    bucket = os.getenv("AWS_S3_BUCKET", "").strip()
-    region = os.getenv("AWS_REGION", "").strip() or None
-    prefix = os.getenv("AWS_S3_PREFIX", "cvs").strip("/")
-
-    if not bucket:
-        log.error("AWS_S3_BUCKET is not configured.")
-        return False
-
+def _update_manifest_path(manifest_state: JsonState, digest: str, final_path: Path) -> None:
+    """Keep the register pointing at the renamed file, so the fetcher's duplicate check finds it."""
+    entry = manifest_entry(manifest_state.get("by_hash", {}), digest)
+    if not entry:
+        return
     try:
-        # Preserve the folder hierarchy beneath data/cvs.
-        relative_path = path.relative_to(settings.cv_folder)
-        key = "/".join(
-            part for part in (prefix, relative_path.as_posix()) if part
-        )
-
-        s3 = boto3.client("s3", region_name=region)
-
-        s3.upload_file(
-            str(path),
-            bucket,
-            key,
-            ExtraArgs={"ContentType": "application/pdf"},
-        )
-
-        log.info("S3 upload successful: s3://%s/%s", bucket, key)
-        return True
-
-    except Exception:
-        log.exception("S3 upload failed for %s", path)
-        return False    
+        relative_path = str(final_path.relative_to(settings.cv_folder))
+    except ValueError:
+        relative_path = str(final_path)
+    if entry.get("file") != relative_path:
+        entry["file"] = relative_path
+        manifest_state.save()

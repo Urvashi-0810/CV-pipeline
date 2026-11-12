@@ -20,7 +20,7 @@ Command-line entry point.
     python main.py jobfit      --job python-developer             # STEP 4: LLM scores the shortlist
     python main.py pipeline    --job python-developer             # requirements + shortlist + jobfit
 
-    python main.py serve                      # start the API for the React frontend (http://localhost:8000/docs)
+    python main.py serve                      # start the API for the React frontend (http://localhost:8100/docs)
 """
 from __future__ import annotations
 
@@ -227,7 +227,8 @@ def main():
 
     sv = sub.add_parser("serve", help="start the API server")
     sv.add_argument("--host", default="127.0.0.1")
-    sv.add_argument("--port", type=int, default=8000)
+    # 8100, because the CRM backend uses 8000. Use --host 0.0.0.0 to serve other PCs on the network.
+    sv.add_argument("--port", type=int, default=8100)
     sv.add_argument("--reload", action="store_true", help="auto-restart on code changes (dev)")
     sv.set_defaults(func=cmd_serve)
 
