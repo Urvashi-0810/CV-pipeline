@@ -82,4 +82,4 @@ def test_fetch_without_credentials_reports_error(clean_data, monkeypatch):
     monkeypatch.setattr(settings, "imap_password", "")
     t = client.post("/api/fetch", json={}).json()
     done = wait(t["id"])
-    assert done["status"] == "error" and "IMAP" in done["error"]
+    assert done["status"] == "error" and "password is missing" in done["error"]

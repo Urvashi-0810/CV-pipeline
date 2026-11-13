@@ -72,7 +72,7 @@ def test_only_the_talent_pool_admin_can_see_settings(client):
     response = client.get("/api/admin/settings")
     assert response.status_code == 403 and response.json()["type"].endswith("admin-session-required")
     assert client.put("/api/admin/settings", json={"values": {}}).status_code == 403
-    assert client.post("/api/admin/settings/test/mail").status_code == 403
+    assert client.post("/api/admin/settings/test/s3").status_code == 403
 
 
 def test_secrets_are_never_sent(admin, isolated):
@@ -89,9 +89,11 @@ def test_secrets_are_never_sent(admin, isolated):
 def test_values_and_defaults(admin):
     body = admin.get("/api/admin/settings").json()
     assert [g["id"] for g in body["groups"]] == ["llm", "mail", "s3", "folders", "database", "login"]
-    assert setting(body, "IMAP_HOST")["value"] == "imap.zoho.in" and not setting(body, "IMAP_HOST")["is_default"]
-    port = setting(body, "IMAP_PORT")
-    assert port["value"] == "993" and port["is_default"]
+    assert setting(body, "LLM_PROVIDER")["value"] == "gemini" and not setting(body, "LLM_PROVIDER")["is_default"]
+    size = setting(body, "MAX_ATTACHMENT_MB")
+    assert size["value"] == "15" and size["is_default"]
+    # Mailboxes are managed on their own tab now, not here.
+    assert not any(s["key"].startswith("IMAP_") for g in body["groups"] for s in g["settings"])
 
 
 def test_the_defaults_match_the_app():
@@ -104,10 +106,9 @@ def test_the_defaults_match_the_app():
     fresh = Settings()
     assert fresh.llm_provider == names["LLM_PROVIDER"].default
     assert fresh.claude_model == names["CLAUDE_MODEL"].default and fresh.gemini_model == names["GEMINI_MODEL"].default
-    assert fresh.imap_port == int(names["IMAP_PORT"].default) and fresh.imap_folder == names["IMAP_FOLDER"].default
     assert fresh.max_attachment_mb == float(names["MAX_ATTACHMENT_MB"].default)
     assert fresh.aws_region == names["AWS_REGION"].default and fresh.aws_s3_prefix == names["AWS_S3_PREFIX"].default
-    assert fresh.cv_parser == names["CV_PARSER"].default and fresh.imap_host == names["IMAP_HOST"].default
+    assert fresh.cv_parser == names["CV_PARSER"].default
     assert fresh.session_ttl_hours == int(names["SESSION_TTL_HOURS"].default)
     assert fresh.admin_session_minutes == int(names["ADMIN_SESSION_MINUTES"].default)
     assert fresh.password_min_length == int(names["PASSWORD_MIN_LENGTH"].default)
@@ -117,15 +118,15 @@ def test_the_defaults_match_the_app():
 # ---------- saving ----------
 
 def test_saving_edits_lines_in_place_and_applies_at_once(admin, isolated):
-    response = save(admin, {"IMAP_HOST": "imap.gmail.com", "IMAP_PORT": "143", "CLAUDE_MODEL": "claude-x"})
+    response = save(admin, {"LLM_PROVIDER": "claude", "MAX_ATTACHMENT_MB": "20", "CLAUDE_MODEL": "claude-x"})
 
     assert response.status_code == 200 and response.json()["restart_required"] == []
     text = isolated.read_bytes().decode()
     assert "\r\n" in text and "\n" not in text.replace("\r\n", "")          # line endings kept
-    assert text.startswith("# LLM\r\nLLM_PROVIDER=gemini\r\n")               # comments and order kept
-    assert "IMAP_HOST=imap.gmail.com\r\nIMAP_FOLDER=INBOX" in text
-    assert text.index("IMAP_PORT=143") > text.index("set from the Talent Pool settings page")
-    assert settings.imap_host == "imap.gmail.com" and settings.imap_port == 143 and settings.claude_model == "claude-x"
+    assert text.startswith("# LLM\r\nLLM_PROVIDER=claude\r\n")               # edited in place, comments kept
+    assert "IMAP_HOST=imap.zoho.in\r\nIMAP_FOLDER=INBOX" in text            # other lines left alone
+    assert text.index("MAX_ATTACHMENT_MB=20.0") > text.index("set from the Talent Pool settings page")
+    assert settings.llm_provider == "claude" and settings.max_attachment_mb == 20 and settings.claude_model == "claude-x"
 
 
 def test_settings_read_at_startup_wait_for_a_restart(admin, isolated):
@@ -136,13 +137,13 @@ def test_settings_read_at_startup_wait_for_a_restart(admin, isolated):
     body = admin.get("/api/admin/settings").json()
     # (The test run's own temporary folders also differ from this throwaway .env, so only CV_FOLDER is checked.)
     assert "CV_FOLDER" in body["restart_pending"] and setting(body, "CV_FOLDER")["pending_restart"]
-    assert "DATABASE_URL" not in body["restart_pending"] and not setting(body, "IMAP_HOST")["pending_restart"]
+    assert "DATABASE_URL" not in body["restart_pending"] and not setting(body, "CLAUDE_MODEL")["pending_restart"]
 
 
 @pytest.mark.parametrize("value", [r"C:\Users\HP\My CVs", "has # hash", "it's quoted", 'say "hi"', "a\\b c's \"d\""])
 def test_awkward_values_read_back_exactly(admin, isolated, value):
-    assert save(admin, {"IMAP_FOLDER": value}).status_code == 200
-    assert dotenv_values(isolated)["IMAP_FOLDER"] == value
+    assert save(admin, {"CLAUDE_MODEL": value}).status_code == 200
+    assert dotenv_values(isolated)["CLAUDE_MODEL"] == value
 
 
 def test_a_blank_secret_keeps_it_and_clear_removes_it(admin, isolated):
@@ -156,8 +157,9 @@ def test_a_blank_secret_keeps_it_and_clear_removes_it(admin, isolated):
 
 
 def test_a_blank_setting_goes_back_to_its_default(admin, isolated):
-    save(admin, {"IMAP_FOLDER": ""})
-    assert "IMAP_FOLDER" not in dotenv_values(isolated) and settings.imap_folder == "INBOX"
+    save(admin, {"CLAUDE_MODEL": "claude-x"})
+    save(admin, {"CLAUDE_MODEL": ""})
+    assert "CLAUDE_MODEL" not in dotenv_values(isolated) and settings.claude_model == "claude-sonnet-4-5"
 
 
 def test_aws_keys_are_set_in_the_environment_for_s3(admin):
@@ -184,16 +186,15 @@ def test_older_s3_key_names_are_recognised_and_cleared_together(admin, isolated)
 
 
 @pytest.mark.parametrize("values,field", [
-    ({"IMAP_PORT": "99999"}, "IMAP_PORT"),
-    ({"IMAP_PORT": "abc"}, "IMAP_PORT"),
+    ({"MAX_ATTACHMENT_MB": "999"}, "MAX_ATTACHMENT_MB"),
+    ({"SESSION_TTL_HOURS": "abc"}, "SESSION_TTL_HOURS"),
     ({"LLM_PROVIDER": "openai"}, "LLM_PROVIDER"),
     ({"COOKIE_SECURE": "maybe"}, "COOKIE_SECURE"),
-    ({"FETCH_SINCE_DATE": "10/09/2026"}, "FETCH_SINCE_DATE"),
-    ({"FETCH_SINCE_DATE": "2026-09-10", "FETCH_UNTIL_DATE": "2026-01-01"}, "FETCH_UNTIL_DATE"),
     ({"DATABASE_URL": "mysql://x@y/z"}, "DATABASE_URL"),
     ({"TEST_DATABASE_URL": "postgresql+psycopg://u:p@h/talent"}, "TEST_DATABASE_URL"),
     ({"CORS_ORIGINS": "http://localhost:5173/"}, "CORS_ORIGINS"),
-    ({"IMAP_FOLDER": "two\nlines"}, "IMAP_FOLDER"),
+    ({"CLAUDE_MODEL": "two\nlines"}, "CLAUDE_MODEL"),
+    ({"IMAP_HOST": "imap.gmail.com"}, "IMAP_HOST"),
     ({"NOT_A_SETTING": "x"}, "NOT_A_SETTING"),
 ])
 def test_bad_values_are_refused_and_nothing_is_written(admin, isolated, values, field):
@@ -210,37 +211,6 @@ def test_lists_are_tidied(admin, isolated):
 
 
 # ---------- connection tests ----------
-
-class FakeMailBox:
-    folders = ["INBOX", "Jobs"]
-
-    def __init__(self, host, port=993, timeout=None):
-        self.folder = SimpleNamespace(list=lambda: [SimpleNamespace(name=n) for n in FakeMailBox.folders])
-
-    def login(self, user, password):
-        if password != "right":
-            raise RuntimeError("AUTHENTICATIONFAILED")
-        return self
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        pass
-
-
-def test_mail_connection(admin, monkeypatch):
-    import imap_tools
-    monkeypatch.setattr(imap_tools, "MailBox", FakeMailBox)
-    save(admin, {"IMAP_USER": "hr@example.com", "IMAP_PASSWORD": "right", "IMAP_FOLDER": "Jobs"})
-    assert admin.post("/api/admin/settings/test/mail").json()["ok"]
-    save(admin, {"IMAP_FOLDER": "Missing"})
-    result = admin.post("/api/admin/settings/test/mail").json()
-    assert not result["ok"] and "no folder called" in result["message"]
-    save(admin, {"IMAP_PASSWORD": "wrong"})
-    failed = admin.post("/api/admin/settings/test/mail").json()
-    assert not failed["ok"] and "AUTHENTICATIONFAILED" in failed["message"] and "wrong" not in failed["message"]
-
 
 def test_s3_connection(admin, monkeypatch):
     calls = []

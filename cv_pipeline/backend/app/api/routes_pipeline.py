@@ -30,14 +30,25 @@ def df_records(df) -> list[dict]:
     return json.loads(df.to_json(orient="records", date_format="iso")) if len(df) else []
 
 
-def _submit(kind: str, lane: str, fn, params: dict, controllable: bool = False) -> dict:
+def _submit(kind: str, lane: str, fn, params: dict, controllable: bool = False, queue: bool = False) -> dict:
     try:
-        return tasks.submit(kind, lane, fn, params, controllable=controllable).to_dict()
+        return tasks.submit(kind, lane, fn, params, controllable=controllable, queue=queue).to_dict()
     except LaneBusy as e:
         raise HTTPException(409, {"message": str(e), "task": e.task.to_dict()})
 
 
 # ------------------------------------------------------------------ info
+def _mailbox_count() -> int:
+    if not settings.database_url:
+        return 0
+    from sqlalchemy import func, select
+
+    from app.db.models import Mailbox
+    from app.db.session import session_scope
+    with session_scope() as session:
+        return session.scalar(select(func.count()).select_from(Mailbox))
+
+
 @router.get("/config")
 def config():
     """Non-secret settings, so the UI can show what is configured."""
@@ -48,6 +59,7 @@ def config():
         "gemini_model": settings.gemini_model,
         "imap": {"host": settings.imap_host, "user": settings.imap_user, "folder": settings.imap_folder,
                  "configured": bool(settings.imap_user and settings.imap_password)},
+        "mailboxes": _mailbox_count(),
         "s3": {"bucket": settings.aws_s3_bucket, "region": settings.aws_region,
                "configured": bool(settings.aws_s3_bucket)},
         "database": {"configured": bool(settings.database_url)},
@@ -80,13 +92,42 @@ def status():
 
 
 # ------------------------------------------------------------------ steps 1-2 (background)
+def _mail_source(body: FetchRequest):
+    """The chosen mailbox, folder and period. Returns (source, description); source None = the .env mailbox."""
+    if (body.since is None) != (body.until is None):
+        raise HTTPException(422, "Give both a from date and a to date, or neither for new mail since the last fetch.")
+    if body.since and body.until and body.since > body.until:
+        raise HTTPException(422, "The from date must be on or before the to date.")
+    if body.mailbox_id is None:
+        if settings.database_url:
+            from app.db.session import session_scope
+            from app.db.models import Mailbox
+            from sqlalchemy import select
+            with session_scope() as session:
+                if session.scalar(select(Mailbox.id).limit(1)) is not None:
+                    raise HTTPException(422, "Choose which mailbox to fetch from.")
+        about = {"mailbox": settings.imap_user, "folder": settings.imap_folder, "mode": "new"}
+        return None, about
+    from app.db.session import session_scope
+    from app.talent.mailboxes import source_for
+    with session_scope() as session:
+        return source_for(session, body.mailbox_id, body.folder, body.since, body.until)
+
+
+def _fetch(body: FetchRequest, source, about: dict, progress) -> dict:
+    from app.fetcher.mail_fetcher import fetch_cvs
+    return {**fetch_cvs(reset=body.reset, progress=progress, source=source).as_dict(), **about}
+
+
 @router.post("/fetch")
 def fetch(body: FetchRequest = FetchRequest()):
-    """Fetch new mail; each batch's CVs are extracted as it goes. Progress counts mails."""
-    from app.fetcher.mail_fetcher import fetch_cvs
-    return _submit("fetch", "pipeline",
-                   recorded("fetch", lambda p: fetch_cvs(reset=body.reset, progress=p).as_dict()), body.model_dump(),
-                   controllable=True)
+    """Fetch one mailbox folder, new mail or a date range; CVs are extracted as it goes.
+
+    Progress counts mails. If another fetch is running, this one waits its turn.
+    """
+    source, about = _mail_source(body)
+    return _submit("fetch", "pipeline", recorded("fetch", lambda p: _fetch(body, source, about, p)),
+                   about, controllable=True, queue=True)
 
 
 @router.post("/extract")
@@ -101,16 +142,16 @@ def extract(body: ExtractRequest = ExtractRequest()):
 @router.post("/run")
 def run_all(body: RunRequest = RunRequest()):
     from app.extractor.cv_extractor import run_extraction
-    from app.fetcher.mail_fetcher import fetch_cvs
+    source, about = _mail_source(body)
 
     def job(p):
-        f = fetch_cvs(reset=body.reset, progress=p).as_dict()
+        f = _fetch(body, source, about, p)
         if f["cancelled"]:
             return {"fetch": f, "extract": None, "cancelled": True}
         # Then any CV files on disk not extracted yet (e.g. ones that failed before)
         e = run_extraction(provider=body.provider, force=body.force, limit=body.limit, progress=p).as_dict()
         return {"fetch": f, "extract": e}
-    return _submit("run", "pipeline", recorded("run", job), body.model_dump(), controllable=True)
+    return _submit("run", "pipeline", recorded("run", job), about, controllable=True, queue=True)
 
 
 @router.get("/pipeline/runs")

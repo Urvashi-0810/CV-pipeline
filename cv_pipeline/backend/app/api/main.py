@@ -19,10 +19,12 @@ from app.api.routes_auth import router as auth_router
 from app.api.routes_jobs import router as jobs_router
 from app.api.routes_pipeline import resume_pending_uploads
 from app.api.routes_pipeline import router as pipeline_router
+from app.api.routes_mailboxes import router as mailboxes_router
 from app.api.routes_settings import router as settings_router
 from app.api.routes_talent import router as talent_router
 from app.auth.deps import require_login
 from app.core.config import settings
+from app.talent.mailboxes import import_env_mailbox
 from app.talent.runs import close_interrupted_runs
 
 # Routes anyone can reach. Everything else is behind require_login (checked by tests/test_auth.py).
@@ -33,6 +35,7 @@ PUBLIC_PATHS = {"/api/health", "/api/auth/login"}
 async def lifespan(_app: FastAPI):
     settings.ensure_dirs()          # make sure data folders exist before serving
     close_interrupted_runs()        # runs cut off by a restart show as stopped, not running forever
+    import_env_mailbox()            # the .env mailbox joins the mailbox list (once)
     resume_pending_uploads()        # uploads that were waiting when the server stopped
     yield
 
@@ -62,3 +65,4 @@ app.include_router(pipeline_router, dependencies=logged_in)
 app.include_router(jobs_router, dependencies=logged_in)
 app.include_router(talent_router, dependencies=logged_in)
 app.include_router(settings_router, dependencies=logged_in)     # also needs Talent Pool admin
+app.include_router(mailboxes_router, dependencies=logged_in)    # changes need Talent Pool admin

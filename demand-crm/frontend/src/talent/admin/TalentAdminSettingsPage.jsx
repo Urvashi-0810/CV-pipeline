@@ -5,7 +5,7 @@ import { useTalentAdmin } from './TalentAdminGate'
 
 // Every Talent Pool setting, saved to the backend's .env. Talent Pool admin only.
 // Secrets are never shown: the page only says whether each is set, and a new value replaces it.
-const TESTS = { llm: 'llm', mail: 'mail', s3: 's3', database: 'database' }
+const TESTS = { llm: 'llm', s3: 's3', database: 'database' }
 const TEST_LABELS = { llm: 'Test the AI', mail: 'Test mailbox login', s3: 'Test bucket access', database: 'Test database' }
 const isSecret = (s) => s.kind === 'secret' || s.kind === 'url'
 

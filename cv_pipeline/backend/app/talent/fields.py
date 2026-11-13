@@ -13,10 +13,18 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Optional
 
 TEXT_FIELDS = ("full_name", "email", "phone", "passport_number", "job_title", "company",
-               "date_of_birth", "location", "summary", "education")
+               "date_of_birth", "location", "summary", "education",
+               "gender", "nationality", "passport_expiry", "passport_type")
 LIST_FIELDS = ("skills", "certifications", "languages")
 NUMBER_FIELDS = ("experience_years", "age")
-FIELDS = TEXT_FIELDS + LIST_FIELDS + NUMBER_FIELDS
+# Jobs with dates, country and sector. The client's experience columns are calculated from it.
+JSON_FIELDS = ("work_history",)
+FIELDS = TEXT_FIELDS + LIST_FIELDS + NUMBER_FIELDS + JSON_FIELDS
+# Not edited by hand: they come only from CVs.
+NOT_EDITABLE = {"work_history"}
+DATE_FIELDS = ("date_of_birth", "passport_expiry")
+CHOICES = {"gender": ("Male", "Female"), "passport_type": ("ECR", "ECNR")}
+WORK_KEYS = ("employer", "position", "country", "sector", "other_sector", "start_date", "end_date")
 
 # The LLM rewrites the summary every time, so a new summary never replaces a manual edit.
 NEVER_REPLACES_AN_EDIT = {"summary"}
@@ -70,8 +78,20 @@ def _age(value: Any) -> Optional[int]:
     return int(number) if 0 <= number < 150 else None
 
 
+def _work_history(value: Any) -> list[dict]:
+    jobs = []
+    for job in value if isinstance(value, list) else []:
+        if isinstance(job, dict):
+            cleaned = {key: _text(job.get(key)) for key in WORK_KEYS}
+            if any(cleaned.values()):
+                jobs.append(cleaned)
+    return jobs
+
+
 def to_column(field: str, value: Any) -> Any:
     """One extracted value, cleaned for the candidates table."""
+    if field in JSON_FIELDS:
+        return _work_history(value)
     if field in LIST_FIELDS:
         return _list(value)
     if field == "experience_years":
@@ -94,6 +114,8 @@ def display(value: Any) -> Optional[str]:
     if is_blank(value):
         return None
     if isinstance(value, list):
+        if value and isinstance(value[0], dict):
+            return f"{len(value)} job{'s' if len(value) != 1 else ''}"
         return ", ".join(value)
     return str(value)
 
@@ -124,6 +146,8 @@ def current_age(born: Optional[date], stored_age: Optional[int], today: Optional
 
 def _comparable(field: str, value: Any) -> Any:
     value = to_column(field, value)
+    if field in JSON_FIELDS:
+        return tuple(tuple(sorted((k, (v or "").lower()) for k, v in job.items())) for job in value)
     if field in LIST_FIELDS:
         return frozenset(" ".join(item.lower().split()) for item in value)
     if isinstance(value, str):

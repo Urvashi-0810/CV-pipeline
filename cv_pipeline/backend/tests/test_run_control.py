@@ -146,7 +146,8 @@ def test_pause_waits_after_the_current_cv_and_resume_finishes(gate):
     paused = wait_for(task["id"], "paused")
     assert paused["pause_requested"]
 
-    assert client.post("/api/fetch", json={}).status_code == 409   # a paused run still holds the pipeline
+    # A paused run still holds the pipeline: an extract is refused (a fetch would queue up behind it).
+    assert client.post("/api/extract", json={}).status_code == 409
 
     resumed = client.post(f"/api/tasks/{task['id']}/resume").json()
     assert not resumed["pause_requested"]

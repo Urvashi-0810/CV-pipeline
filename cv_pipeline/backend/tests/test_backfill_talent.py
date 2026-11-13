@@ -351,7 +351,7 @@ def test_a_real_load_rebuilds_the_excel_and_keeps_the_old_one():
     assert result["excel"].startswith("rebuilt from Postgres with 2 rows")
     backup = settings.output_excel.with_name("candidates.before_talent_backfill.xlsx")
     assert backup.read_bytes() == before
-    rebuilt = pd.read_excel(settings.output_excel, sheet_name=SHEET, dtype=str)
+    rebuilt = pd.read_excel(settings.output_excel, sheet_name="All fields", dtype=str)
     assert list(rebuilt[KEY]) == ["aaa", "bbb"] and set(rebuilt["Location"]) == {"Pune"}
 
 

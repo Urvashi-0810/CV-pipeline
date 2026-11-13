@@ -23,6 +23,7 @@ from app.core.models import Candidate
 log = get_logger("excel")
 
 SHEET = "Candidates"
+ALL_FIELDS_SHEET = "All fields"
 KEY = "File Hash"
 
 # Column order in the Excel file (and width in characters)
@@ -89,8 +90,10 @@ def load_candidates(path: Path | None = None) -> pd.DataFrame:
     path = path or settings.output_excel
     if not path.exists():
         return pd.DataFrame(columns=list(COLUMNS))
-    df = pd.read_excel(path, sheet_name=SHEET, dtype={KEY: str, "Phone": str})
-    return df
+    # Rebuilt from Postgres, the file has the client's layout on "Candidates" and these columns on "All fields".
+    with pd.ExcelFile(path) as workbook:
+        sheet = ALL_FIELDS_SHEET if ALL_FIELDS_SHEET in workbook.sheet_names else SHEET
+        return pd.read_excel(workbook, sheet_name=sheet, dtype={KEY: str, "Phone": str})
 
 
 def upsert_rows(rows: list[dict], path: Path | None = None) -> int:

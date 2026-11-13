@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Candidate, CvDocument, EditHistory, ReviewFlag, build_search_text
 from app.talent import fields as F
+from app.talent.experience import total_years
 from app.talent.matching import find_match, marked_different_people
 
 
@@ -39,6 +40,11 @@ def cv_keys(extracted: dict) -> dict:
 def refresh_candidate(candidate: Candidate) -> None:
     """Recompute the matching keys, birth date and search text after any change of values."""
     candidate.birth_date = F.birth_date(candidate.date_of_birth)
+    if candidate.work_history and "experience_years" not in (candidate.manual_fields or {}):
+        # The experience filter and sort use the total worked out from the dated jobs (unless edited by hand).
+        years = total_years(candidate.work_history)
+        if years is not None:
+            candidate.experience_years = F.to_column("experience_years", years)
     candidate.passport_norm = F.passport_key(candidate.passport_number)
     candidate.email_norm = F.email_key(candidate.email)
     candidate.phone_norm = F.phone_key(candidate.phone)
@@ -187,5 +193,7 @@ def extracted_from_model(candidate, education: Optional[str]) -> dict:
         "location": candidate.location, "summary": candidate.summary, "education": education,
         "skills": list(candidate.skills), "certifications": list(candidate.certifications),
         "languages": list(candidate.languages), "experience_years": candidate.total_experience_years,
-        "age": candidate.age,
+        "age": candidate.age, "gender": candidate.gender, "nationality": candidate.nationality,
+        "passport_expiry": candidate.passport_expiry, "passport_type": candidate.passport_type,
+        "work_history": [job.model_dump() for job in candidate.work_history],
     }

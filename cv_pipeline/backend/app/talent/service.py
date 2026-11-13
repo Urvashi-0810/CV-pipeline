@@ -6,7 +6,10 @@ removes the person's files from S3, the local disk, the JSON state and the job f
 """
 from __future__ import annotations
 
+import re
+import tempfile
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import pandas as pd
@@ -23,7 +26,8 @@ from app.db.session import session_scope
 from app.storage import s3_store
 from app.storage.excel_store import KEY, write_sheets
 from app.talent import fields as F
-from app.talent.excel_export import request_refresh
+from app.talent.excel_export import _qualification, request_refresh
+from app.talent.experience import age_text, dmy, experience_columns
 from app.talent.ingest import _flag_duplicate, refresh_candidate, refresh_needs_review
 from app.talent.matching import duplicates_after_edit
 
@@ -69,13 +73,45 @@ def _get(session: Session, candidate_id: int, *, lock: bool = False) -> Candidat
 
 # ---------- list ----------
 
-def list_candidates(session: Session, *, search: str = "", trade: str = "", location: str = "", skills: str = "",
-                    min_experience: Optional[float] = None, max_experience: Optional[float] = None,
-                    min_age: Optional[int] = None, max_age: Optional[int] = None,
-                    received_from: Optional[date] = None, received_to: Optional[date] = None,
-                    source: str = "", needs_review: Optional[bool] = None, include_unknown: bool = True,
-                    sort: str = "received", order: str = "desc", limit: int = 50, offset: int = 0) -> dict:
+def list_candidates(session: Session, *, sort: str = "received", order: str = "desc", limit: int = 50,
+                    offset: int = 0, **filters) -> dict:
+    conditions = filter_conditions(**filters)
+    total = session.scalar(select(func.count()).select_from(Candidate).where(*conditions))
+    sort_column = SORTS.get(sort, SORTS["received"])
+    ordering = sort_column.asc().nulls_last() if order == "asc" else sort_column.desc().nulls_last()
+    cv_count = select(func.count()).where(CvDocument.candidate_id == Candidate.id).scalar_subquery()
+    latest = CvDocument.__table__.alias("latest")
+    rows = session.execute(
+        select(Candidate, AGE.label("current_age"), cv_count.label("cv_count"), latest.c.s3_status)
+        .outerjoin(latest, latest.c.id == Candidate.latest_cv_id)
+        .where(*conditions).order_by(ordering, Candidate.id.desc())
+        .limit(max(1, min(limit, MAX_PAGE))).offset(max(0, offset)))
+    today = date.today()
+    items = [{
+        "id": c.id, "full_name": c.full_name, "job_title": c.job_title, "passport_number": c.passport_number,
+        "experience_years": _number(c.experience_years), "age": age, "location": c.location,
+        # The client's wording, worked out as of today
+        "total_experience": experience_columns(c.work_history, today)["Total Experience"],
+        "age_text": age_text(c.birth_date, c.age, today),
+        "received_at": c.received_at, "needs_review": c.needs_review, "cv_count": count,
+        "latest_cv_id": c.latest_cv_id, "latest_cv_viewable": status == "success",
+        "has_client_fields": bool(c.work_history),
+    } for c, age, count, status in rows]
+    return {"total": total, "items": items}
+
+
+def filter_conditions(*, search: str = "", trade: str = "", location: str = "", skills: str = "",
+                      min_experience: Optional[float] = None, max_experience: Optional[float] = None,
+                      min_age: Optional[int] = None, max_age: Optional[int] = None,
+                      received_from: Optional[date] = None, received_to: Optional[date] = None,
+                      source: str = "", needs_review: Optional[bool] = None, include_unknown: bool = True,
+                      missing_client_fields: Optional[bool] = None) -> list:
+    """The list's filters, shared with bulk re-extraction so both act on the same candidates."""
     conditions = []
+    if missing_client_fields is not None:
+        # Extracted before the client's fields existed: no dated work history yet.
+        empty = func.jsonb_array_length(Candidate.work_history) == 0
+        conditions.append(empty if missing_client_fields else ~empty)
     if search.strip():
         conditions.append(Candidate.search_text.ilike(_like(search)))
     if trade.strip():
@@ -102,24 +138,12 @@ def list_candidates(session: Session, *, search: str = "", trade: str = "", loca
         conditions.append(exists().where(CvDocument.candidate_id == Candidate.id, match))
     if needs_review is not None:
         conditions.append(Candidate.needs_review.is_(needs_review))
+    return conditions
 
-    total = session.scalar(select(func.count()).select_from(Candidate).where(*conditions))
-    sort_column = SORTS.get(sort, SORTS["received"])
-    ordering = sort_column.asc().nulls_last() if order == "asc" else sort_column.desc().nulls_last()
-    cv_count = select(func.count()).where(CvDocument.candidate_id == Candidate.id).scalar_subquery()
-    latest = CvDocument.__table__.alias("latest")
-    rows = session.execute(
-        select(Candidate, AGE.label("current_age"), cv_count.label("cv_count"), latest.c.s3_status)
-        .outerjoin(latest, latest.c.id == Candidate.latest_cv_id)
-        .where(*conditions).order_by(ordering, Candidate.id.desc())
-        .limit(max(1, min(limit, MAX_PAGE))).offset(max(0, offset)))
-    items = [{
-        "id": c.id, "full_name": c.full_name, "job_title": c.job_title, "passport_number": c.passport_number,
-        "experience_years": _number(c.experience_years), "age": age, "location": c.location,
-        "received_at": c.received_at, "needs_review": c.needs_review, "cv_count": count,
-        "latest_cv_id": c.latest_cv_id, "latest_cv_viewable": status == "success",
-    } for c, age, count, status in rows]
-    return {"total": total, "items": items}
+
+def candidate_ids(session: Session, **filters) -> list[int]:
+    return list(session.scalars(select(Candidate.id).where(*filter_conditions(**filters))
+                                .order_by(Candidate.received_at.desc().nulls_last(), Candidate.id.desc())))
 
 
 def filter_options(session: Session) -> dict:
@@ -185,7 +209,15 @@ def candidate_detail(session: Session, candidate_id: int) -> dict:
         or_(ReviewFlag.candidate_id == c.id, ReviewFlag.other_candidate_id == c.id)).order_by(ReviewFlag.id))
     values = {name: getattr(c, name) for name in F.FIELDS}
     values["experience_years"] = _number(values["experience_years"])
+    today = date.today()
     return {
+        # The client's columns, worked out as of today, exactly as the Excel shows them
+        "client": {
+            "Age": age_text(c.birth_date, c.age, today),
+            "D-O-B": dmy(c.date_of_birth), "PassPort Expiry": dmy(c.passport_expiry),
+            "Qualification": _qualification(c.education),
+            **experience_columns(c.work_history, today),
+        },
         "id": c.id, "values": values, "age": F.current_age(c.birth_date, c.age),
         "age_from_birth_date": c.birth_date is not None, "manual_fields": sorted(c.manual_fields or {}),
         "needs_review": c.needs_review, "received_at": c.received_at, "row_version": c.row_version,
@@ -208,10 +240,24 @@ def edit_history(session: Session, candidate_id: int) -> list[dict]:
 
 # ---------- edit ----------
 
+def _invalid_edit(name: str, message: str) -> ProblemError:
+    return ProblemError(422, "validation-error", "Some fields are invalid", "Fix the listed fields and try again.",
+                        errors=[{"field": name, "message": message}])
+
+
 def _clean_edit(name: str, value: Any) -> Any:
-    if name not in F.FIELDS:
-        raise ProblemError(422, "validation-error", "Some fields are invalid", "Fix the listed fields and try again.",
-                           errors=[{"field": name, "message": "This field can't be edited."}])
+    if name not in F.FIELDS or name in F.NOT_EDITABLE:
+        raise _invalid_edit(name, "This field can't be edited.")
+    if name in F.CHOICES and not F.is_blank(value) and value not in F.CHOICES[name]:
+        raise _invalid_edit(name, f"Choose {' or '.join(F.CHOICES[name])}.")
+    if name in F.DATE_FIELDS and isinstance(value, str) and value.strip():
+        # The client writes dates as DD-MM-YYYY; they're stored as YYYY-MM-DD.
+        match = re.fullmatch(r"(\d{2})-(\d{2})-(\d{4})", value.strip())
+        value = f"{match.group(3)}-{match.group(2)}-{match.group(1)}" if match else value.strip()
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            raise _invalid_edit(name, "Use the format DD-MM-YYYY.")
     if isinstance(value, str) and len(value) > MAX_TEXT_LENGTH:
         raise ProblemError(422, "validation-error", "Some fields are invalid", "Fix the listed fields and try again.",
                            errors=[{"field": name, "message": f"At most {MAX_TEXT_LENGTH} characters."}])
@@ -508,6 +554,67 @@ def retry_failed_uploads(progress: Callable[[int, int, str], None]) -> dict:
     processed.save()
     progress(len(todo), len(todo), "done")
     if result["uploaded"]:
+        request_refresh(delay=0)
+    return result
+
+
+# ---------- re-extract (fills the client's fields for CVs extracted before they existed) ----------
+
+def _cv_file(cv_row: tuple, workdir: Path) -> Optional[Path]:
+    """The CV's PDF: the local copy if it's on this computer, else a download from S3."""
+    _, _, relative_path, s3_key, s3_status, file_name = cv_row
+    local = settings.cv_folder / relative_path if relative_path else None
+    if local and local.exists():
+        return local
+    if s3_key and s3_status == "success":
+        target = workdir / (file_name or "cv.pdf")
+        s3_store.download_cv(s3_key, target)
+        return target
+    return None
+
+
+def reextract_candidates(ids: list[int], progress: Callable[[int, int, str], None]) -> dict:
+    """Run the AI again on each candidate's newest CV. The same rules as a new extraction apply,
+    so manual edits are kept unless the CV says otherwise. Pause and Cancel work between CVs."""
+    from app.extractor.cv_extractor import extract_one
+    from app.storage.excel_store import _fmt_education
+    from app.talent.ingest import extracted_from_model, place_cv
+
+    provider = settings.llm_provider
+    result = {"candidates": len(ids), "updated": 0, "failed": 0, "no_cv_file": 0, "cancelled": False, "errors": {}}
+    with tempfile.TemporaryDirectory(prefix="talent_reextract_") as workdir:
+        for done, candidate_id in enumerate(ids):
+            try:
+                checkpoint()
+            except RunCancelled:
+                result["cancelled"] = True
+                break
+            with session_scope() as session:
+                candidate = session.get(Candidate, candidate_id)
+                cv = session.get(CvDocument, candidate.latest_cv_id) if candidate and candidate.latest_cv_id else None
+                row = (cv.id, cv.file_hash, cv.local_rel_path, cv.s3_key, cv.s3_status, cv.file_name) if cv else None
+                name = (candidate.full_name if candidate else None) or f"candidate {candidate_id}"
+            progress(done, len(ids), name)
+            if row is None:
+                result["no_cv_file"] += 1
+                continue
+            try:
+                path = _cv_file(row, Path(workdir))
+                if path is None:
+                    result["no_cv_file"] += 1
+                    continue
+                model, method, _ = extract_one(path, provider)
+                document = {"file_hash": row[1], "file_name": row[5], "extraction_method": method, "llm": provider,
+                            "extracted_at": _now()}
+                with session_scope() as session:
+                    place_cv(session, document, extracted_from_model(model, _fmt_education(model)))
+                result["updated"] += 1
+            except Exception as e:  # noqa: BLE001 - one bad CV must not stop the rest
+                result["failed"] += 1
+                result["errors"][name] = str(e)[:300]
+                log.warning("Re-extract failed for candidate %s: %s", candidate_id, e)
+    progress(len(ids), len(ids), "done")
+    if result["updated"]:
         request_refresh(delay=0)
     return result
 

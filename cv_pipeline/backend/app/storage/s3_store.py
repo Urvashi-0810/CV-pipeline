@@ -96,6 +96,14 @@ def list_cv_keys() -> set[str]:
     return {item["Key"] for page in pages for item in page.get("Contents", [])}
 
 
+def download_cv(key: str, target: Path) -> None:
+    """Fetch one CV from the bucket (for re-extraction when it isn't on this computer)."""
+    if not settings.aws_s3_bucket:
+        raise S3NotConfigured("AWS_S3_BUCKET is not configured")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _client().download_file(settings.aws_s3_bucket, key, str(target))
+
+
 def delete_cv_keys(keys: list[str]) -> None:
     """Delete CV files from the bucket. Keys that don't exist are fine. Raises if any delete fails."""
     if not keys:

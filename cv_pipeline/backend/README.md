@@ -353,7 +353,20 @@ after changing them.
 
 ### Mailbox setup (Gmail or Zoho)
 
-The pipeline uses IMAP, so switching between Gmail and Zoho is only a change in `.env`.
+**Several mailboxes.** The Talent Pool admin manages them on **Admin → Mailboxes** in the CRM: add,
+edit, test and remove. App passwords are stored in Postgres, encrypted with `MAILBOX_SECRET_KEY`,
+which is created in `.env` the first time it's needed. Keep that key: if it changes or is lost, each
+mailbox's app password has to be entered again. Removing a mailbox keeps its candidates and CVs.
+The mailbox in `.env` (`IMAP_*`) is copied into the list once, the first time the server starts, and
+is still what the command line (`python main.py fetch`) uses.
+
+**Fetching** (Pipeline page, any user): each fetch reads one mailbox and one of its folders, either
+**new mail since the last fetch** (each mailbox folder has its own marker) or **a date range**, both
+dates included. A date-range fetch doesn't move the marker, and CVs already processed are skipped
+either way. A fetch started while another is running waits its turn and can be cancelled while it
+waits. The subject and sender filters (Settings → Mail filters) apply to every mailbox.
+
+The pipeline uses IMAP, so switching between Gmail and Zoho is only a change of mail server.
 
 **Gmail**
 1. Turn on **2-Step Verification** for the Google account.
@@ -525,6 +538,32 @@ Method · LLM · Extracted At · File Hash. The Excel is generated from Postgres
 To extract a new field: add it to `Candidate` in `app/core/models.py` (its `description` is the
 instruction the AI reads), add the column in `excel_store.py`, then run `python main.py extract --force`.
 
+### The client's columns (`app/talent/experience.py`, `app/talent/excel_export.py`)
+
+`candidates.xlsx` has two sheets. **Candidates** is the client's layout, in this order: SR NO, CV
+Extraction Date, Candidate Name, Trade, Passport No, PP Type, PassPort Expiry, D-O-B, Age, Gender,
+Nationality, Qualification, Certification, Indian Experience, Gulf Experience, Total Experience,
+Contact Number, Facility Management Experience, Oil & Gas, Construction, Marine/Shipyard, Healthcare,
+Other Relevant Sector Experience, then Summary and the tracking columns (CV File, Received From, Mail
+Subject, Mail Date, Uploaded to S3, File Hash). **All fields** keeps every other stored field; the
+shortlist and job-fit steps read that sheet.
+
+- **CV Extraction Date** is the day the CV was processed. Dates are DD-MM-YYYY.
+- **Age** is worked out from the date of birth as of today, e.g. `34 yrs 8 mths`.
+- **PP Type** comes from the passport's last page: "Emigration Check Required" means ECR, otherwise
+  ECNR. Without that page in the CV it's "Not found".
+- **Experience** is calculated by code, not the AI. The AI lists each job with its country, sector and
+  dates; months count from the start month to the end month inclusive, ongoing jobs end this month,
+  and overlapping jobs count once. A year on its own runs from January to December, so "2015 – 2018"
+  is 4 years. Jobs with no dates aren't counted.
+- **Gulf** is the Persian Gulf countries (UAE, Saudi Arabia, Qatar, Kuwait, Oman, Bahrain, Iraq,
+  Iran); **Indian** is India. Jobs elsewhere count only in Total. To change the list, edit `GULF`.
+- **Other Relevant Sector Experience** lists each other sector with its time.
+- **"Not found"** means the CV should say it but doesn't; **"-"** means it doesn't apply (no jobs in
+  that country group or sector, no certificates).
+- CVs extracted before these fields existed show "Not found" until they're re-extracted with **Re-extract
+  with AI** (one candidate in its panel, or the current filtered list on the Candidate List page).
+
 ### Step 3 — Shortlist (`app/shortlist/shortlister.py`, no AI)
 
 Each job opening lives in `data/jobs/<slug>/` with `jd.md`, `criteria.json`, `requirements.json` and
@@ -606,6 +645,7 @@ Errors use `application/problem+json`.
 | GET | `/api/talent/candidates/{id}/history` · `/api/talent/cvs/{cv_id}/url` | Edit history · short-lived S3 link |
 | POST | `/api/talent/flags/{id}/merge` · `different-people` · `keep-edit` · `accept` | Resolve a review item |
 | POST | `/api/talent/s3/retry` | Re-upload CVs whose S3 upload failed → task |
+| POST | `/api/talent/candidates/{id}/reextract` · `/api/talent/reextract?<list filters>` | run the AI again to fill the client's fields → **task** (pausable); `GET /api/talent/reextract/count` says how many first |
 | GET | `/api/pipeline/runs?limit=` | Recent runs and their summaries |
 | POST | `/api/fetch` · `/api/extract` · `/api/run` | Start Step 1 / 2 / both → task |
 | GET | `/api/tasks/{id}` | Task status and progress |

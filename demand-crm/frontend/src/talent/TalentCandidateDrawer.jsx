@@ -5,26 +5,46 @@ import { useTalentAuth } from './TalentAuthContext'
 
 // Every editable field, in the order shown. Lists are edited as comma-separated text.
 const FIELDS = [
-  ['full_name', 'Name'],
+  ['full_name', 'Candidate name'],
   ['job_title', 'Trade (current/last job title)'],
-  ['company', 'Current/last company'],
   ['passport_number', 'Passport No.'],
+  ['passport_type', 'PP Type', 'select', ['ECR', 'ECNR']],
+  ['passport_expiry', 'Passport expiry (DD-MM-YYYY)'],
+  ['date_of_birth', 'Date of birth (DD-MM-YYYY)'],
+  ['gender', 'Gender', 'select', ['Male', 'Female']],
+  ['nationality', 'Nationality'],
+  ['phone', 'Contact number'],
   ['email', 'Email'],
-  ['phone', 'Phone'],
-  ['date_of_birth', 'Date of birth (YYYY-MM-DD)'],
-  ['age', 'Age (as stated in the CV)'],
-  ['experience_years', 'Experience (years)'],
+  ['company', 'Current/last company'],
   ['location', 'Location'],
-  ['skills', 'Skills (comma separated)'],
+  ['age', 'Age (as stated in the CV)'],
+  ['experience_years', 'Experience in years (for sorting)'],
   ['certifications', 'Certifications (comma separated)'],
+  ['skills', 'Skills (comma separated)'],
   ['languages', 'Languages (comma separated)'],
-  ['education', 'Education', 'textarea'],
+  ['education', 'Education (highest first)', 'textarea'],
   ['summary', 'Summary', 'textarea'],
 ]
 const LABELS = Object.fromEntries(FIELDS.map(([key, label]) => [key, label.replace(/ \(.*\)$/, '')]))
+const DATE_FIELDS = new Set(['date_of_birth', 'passport_expiry'])
+// The client's columns shown read-only, in their order (from the backend, exactly as in the Excel)
+const CLIENT_SHEET = [
+  'Age', 'D-O-B', 'PassPort Expiry', 'Qualification', 'Indian Experience', 'Gulf Experience', 'Total Experience',
+  'Facility Management Experience', 'Oil & Gas', 'Construction', 'Marine/Shipyard', 'Healthcare',
+  'Other Relevant Sector Experience',
+]
+const SECTOR_NAMES = {
+  facility_management: 'Facility management', oil_gas: 'Oil & Gas', construction: 'Construction',
+  marine_shipyard: 'Marine/Shipyard', healthcare: 'Healthcare',
+}
 
-function asText(value) {
+// Stored dates are YYYY-MM-DD; the client reads and types DD-MM-YYYY.
+function asText(value, key) {
   if (value == null) return ''
+  if (DATE_FIELDS.has(key)) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value))
+    return m ? `${m[3]}-${m[2]}-${m[1]}` : String(value)
+  }
   return Array.isArray(value) ? value.join(', ') : String(value)
 }
 
@@ -169,6 +189,8 @@ export default function TalentCandidateDrawer({ candidateId, onClose, onChanged,
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState(null)
+  const [reextracting, setReextracting] = useState(false)
+  const [reextractNote, setReextractNote] = useState(null)
 
   const load = useCallback(async () => {
     const [data, past] = await Promise.all([
@@ -177,7 +199,7 @@ export default function TalentCandidateDrawer({ candidateId, onClose, onChanged,
     ])
     setDetail(data)
     setHistory(past.items)
-    setForm(Object.fromEntries(FIELDS.map(([key]) => [key, asText(data.values[key])])))
+    setForm(Object.fromEntries(FIELDS.map(([key]) => [key, asText(data.values[key], key)])))
     setViewing((current) => data.cvs.find((cv) => cv.id === current?.id) || data.cvs[0] || null)
   }, [candidateId])
 
@@ -189,7 +211,7 @@ export default function TalentCandidateDrawer({ candidateId, onClose, onChanged,
 
   const changed = useMemo(() => {
     if (!detail) return {}
-    return Object.fromEntries(FIELDS.map(([key]) => key).filter((key) => form[key] !== asText(detail.values[key]))
+    return Object.fromEntries(FIELDS.map(([key]) => key).filter((key) => form[key] !== asText(detail.values[key], key))
       .map((key) => [key, form[key]]))
   }, [form, detail])
   const dirty = Object.keys(changed).length > 0
@@ -228,6 +250,32 @@ export default function TalentCandidateDrawer({ candidateId, onClose, onChanged,
       setError(err)
     } finally {
       setBusy(false)
+    }
+  }
+
+  // Runs as a background task (it shows on the Pipeline page too); this waits for it and reloads.
+  async function reextract() {
+    setReextracting(true)
+    setReextractNote(null)
+    try {
+      let task = await talentApi(`/talent/candidates/${candidateId}/reextract`, { method: 'POST' })
+      while (['queued', 'running', 'paused'].includes(task.status)) {
+        await new Promise((resolve) => setTimeout(resolve, 1500))
+        task = await talentApi(`/tasks/${task.id}`)
+      }
+      if (task.status === 'done' && task.result?.updated) {
+        await load()
+        onChanged()
+        setReextractNote({ tone: 'success', title: 'Re-extracted.', text: 'The fields are filled from the newest CV.' })
+      } else {
+        const why = task.error || Object.values(task.result?.errors || {})[0]
+          || (task.result?.no_cv_file ? "The CV file isn't on this computer or in S3." : 'It was stopped.')
+        setReextractNote({ tone: 'error', title: 'Re-extract did not finish', text: why })
+      }
+    } catch (err) {
+      setReextractNote({ tone: 'error', title: err.title, text: err.message !== err.title ? err.message : null })
+    } finally {
+      setReextracting(false)
     }
   }
 
@@ -300,6 +348,59 @@ export default function TalentCandidateDrawer({ candidateId, onClose, onChanged,
               </div>
             )}
 
+            <div className="stack-sm">
+              <div className="talent-section-head">
+                <h3 className="talent-section-title">Client sheet</h3>
+                <Button variant="ghost" size="sm" disabled={reextracting} onClick={reextract}
+                  title="Run the AI again on the newest CV to fill these fields">
+                  {reextracting ? 'Re-extracting…' : 'Re-extract with AI'}
+                </Button>
+              </div>
+              {reextractNote && <Alert tone={reextractNote.tone} title={reextractNote.title}>{reextractNote.text}</Alert>}
+              {!values.work_history?.length && (
+                <p className="muted small">
+                  This CV was extracted before the client's fields existed. Re-extract it to fill them.
+                </p>
+              )}
+              <dl className="details talent-client-sheet">
+                {CLIENT_SHEET.map((column) => (
+                  <div key={column} className="talent-client-row">
+                    <dt>{column}</dt>
+                    <dd className={detail.client?.[column] === 'Not found' ? 'muted' : ''}>{detail.client?.[column] ?? 'Not found'}</dd>
+                  </div>
+                ))}
+              </dl>
+              {values.work_history?.length > 0 && (
+                <div className="table-wrap">
+                  <table className="table table-compact">
+                    <thead>
+                      <tr>
+                        <th>From</th>
+                        <th>To</th>
+                        <th>Job</th>
+                        <th>Country</th>
+                        <th>Sector</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {values.work_history.map((job, i) => (
+                        <tr key={i}>
+                          <td className="num">{job.start_date || '—'}</td>
+                          <td className="num">{job.end_date || '—'}</td>
+                          <td>{[job.position, job.employer].filter(Boolean).join(' · ') || '—'}</td>
+                          <td>{job.country || '—'}</td>
+                          <td>{SECTOR_NAMES[job.sector] || job.other_sector || 'Other'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="muted small">
+                    A year on its own counts from January to December (2015 – 2018 is 4 years). Jobs with no dates aren't counted.
+                  </p>
+                </div>
+              )}
+            </div>
+
             <form onSubmit={save} className="stack-sm">
               <h3 className="talent-section-title">Details</h3>
               {saved && !dirty && <Alert tone="success">Saved. The Excel is updated in a few seconds.</Alert>}
@@ -312,12 +413,17 @@ export default function TalentCandidateDrawer({ candidateId, onClose, onChanged,
                 </Alert>
               )}
               <div className="talent-form-grid">
-                {FIELDS.map(([key, label, kind]) => (
+                {FIELDS.map(([key, label, kind, options]) => (
                   <div key={key} className={kind === 'textarea' ? 'talent-span-2' : ''}>
                     <Field label={`${label}${detail.manual_fields.includes(key) ? ' · edited' : ''}`} error={errors[key]}
-                      hint={key === 'age' && detail.age_from_birth_date ? `Shown as ${detail.age}, worked out from the date of birth.` : null}>
+                      hint={key === 'age' && detail.age_from_birth_date ? `Shown as ${detail.client?.Age || detail.age}, worked out from the date of birth.` : null}>
                       {(id) => kind === 'textarea' ? (
                         <textarea id={id} rows={3} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} />
+                      ) : kind === 'select' ? (
+                        <select id={id} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })}>
+                          <option value="">Not found</option>
+                          {options.map((o) => <option key={o} value={o}>{o}</option>)}
+                        </select>
                       ) : (
                         <input id={id} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} />
                       )}
@@ -328,7 +434,7 @@ export default function TalentCandidateDrawer({ candidateId, onClose, onChanged,
               <div className="row-end">
                 {dirty && (
                   <Button type="button" variant="ghost" disabled={busy}
-                    onClick={() => setForm(Object.fromEntries(FIELDS.map(([key]) => [key, asText(values[key])])))}>
+                    onClick={() => setForm(Object.fromEntries(FIELDS.map(([key]) => [key, asText(values[key], key)])))}>
                     Discard changes
                   </Button>
                 )}

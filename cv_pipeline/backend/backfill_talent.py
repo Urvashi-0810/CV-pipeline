@@ -34,7 +34,7 @@ from app.core.state import JsonState, manifest_entry
 from app.db.models import CvDocument
 from app.db.session import session_scope
 from app.fetcher.manual_upload import MANUAL_SOURCE
-from app.storage.excel_store import KEY, SHEET
+from app.storage.excel_store import ALL_FIELDS_SHEET, KEY, SHEET
 from app.storage.s3_store import key_for, list_cv_keys, relative_cv_path
 from app.talent import fields as F
 from app.talent import ingest
@@ -70,7 +70,10 @@ def _read_rows() -> list[dict]:
     """Every value as text: Excel would otherwise turn passport numbers into floats."""
     if not settings.output_excel.exists():
         raise FileNotFoundError(f"{settings.output_excel} not found")
-    df = pd.read_excel(settings.output_excel, sheet_name=SHEET, dtype=str)
+    # A rebuilt Excel keeps these columns on "All fields"; the client's own file has them on "Candidates".
+    with pd.ExcelFile(settings.output_excel) as workbook:
+        sheet = ALL_FIELDS_SHEET if ALL_FIELDS_SHEET in workbook.sheet_names else SHEET
+        df = pd.read_excel(workbook, sheet_name=sheet, dtype=str)
     if KEY not in df.columns:
         raise ValueError(f"{settings.output_excel.name} has no {KEY} column")
     df = df.astype(object).where(df.notna(), None)

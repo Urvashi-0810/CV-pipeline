@@ -482,4 +482,5 @@ def test_excel_shows_the_age_from_the_date_of_birth():
     born = date.today().replace(year=date.today().year - 30) - timedelta(days=1)
     person(date_of_birth=born.isoformat(), age=55)
     excel_export.regenerate_excel()
-    assert pd.read_excel(settings.output_excel, dtype=str)["Age"][0] == "30"
+    assert pd.read_excel(settings.output_excel, sheet_name="Candidates", dtype=str)["Age"][0] == "30 yrs"
+    assert pd.read_excel(settings.output_excel, sheet_name="All fields", dtype=str)["Age"][0] == "30"

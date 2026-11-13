@@ -3,7 +3,7 @@ import re
 from pypdf.errors import DependencyError
 from typing import Callable, Optional
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from imap_tools import AND, MailBox
 from imap_tools import U as UidRange
@@ -646,18 +646,41 @@ def _convert_with_word(source_path: Path, output_pdf: Path) -> Path:
         except Exception:
             pass
 
+@dataclass
+class MailSource:
+    """Which mailbox and folder a fetch reads, and which mail.
+
+    since and until (YYYY-MM-DD, both inclusive) make it a date-range run: it reads mail in that
+    period and doesn't move the "last fetch" marker. Without them it reads mail new since the last fetch.
+    """
+    host: str
+    port: int
+    user: str
+    password: str
+    folder: str = "INBOX"
+    since: str = ""
+    until: str = ""
+
+    @property
+    def date_range(self) -> bool:
+        return bool(self.since and self.until)
+
+    @classmethod
+    def from_settings(cls) -> "MailSource":
+        """The single mailbox in .env, as the command line uses it."""
+        return cls(settings.imap_host, settings.imap_port, settings.imap_user, settings.imap_password,
+                   settings.imap_folder, settings.fetch_since_date, settings.fetch_until_date)
+
+
 class MailFetcher:
-    def __init__(self):
+    def __init__(self, source: Optional[MailSource] = None):
         settings.ensure_dirs()
+        self.source = source or MailSource.from_settings()
         self.state = JsonState(settings.state_folder/ "mail_state.json")
         self.manifest = JsonState(settings.state_folder/ "attachments_manifest.json")
-        
-        # Unique key for mailbox + folder
-        self.key = (
-            f"{settings.imap_user}|"
-            f"{settings.imap_host}|"
-            f"{settings.imap_folder}"
-        )
+
+        # Unique key for mailbox + folder: each has its own "last fetch" marker.
+        self.key = mailbox_state_key(self.source.user, self.source.host, self.source.folder)
 
     # ========================================================
     # IMAP connection
@@ -669,18 +692,18 @@ class MailFetcher:
         """
         log.info(
         "Connecting to %s as %s (folder: %s)",
-        settings.imap_host,
-        settings.imap_user,
-        settings.imap_folder,
+        self.source.host,
+        self.source.user,
+        self.source.folder,
         )
 
-        mb = MailBox(settings.imap_host,port=settings.imap_port,)
-        mb.login(settings.imap_user, settings.imap_password, initial_folder=settings.imap_folder,)
+        mb = MailBox(self.source.host,port=self.source.port,)
+        mb.login(self.source.user, self.source.password, initial_folder=self.source.folder,)
         log.info("IMAP state after login: %s",getattr(mb.client,"state","UNKNOWN",),)  
 
         # Explicitly select the mailbox
-        mb.folder.set(settings.imap_folder)
-        log.info("IMAP connection established and folder selected: %s",settings.imap_folder,)
+        mb.folder.set(self.source.folder)
+        log.info("IMAP connection established and folder selected: %s",self.source.folder,)
         return mb
 
     # ========================================================
@@ -702,8 +725,8 @@ class MailFetcher:
 
     def run(self, reset: bool = False, progress: Optional[Callable[[int, int, str], None]] = None) -> FetchResult:
         report = progress or (lambda *_: None)
-        if not settings.imap_user or not settings.imap_password:
-            raise RuntimeError("IMAP_USER / IMAP_PASSWORD missing in .env")
+        if not self.source.user or not self.source.password:
+            raise RuntimeError("The mailbox address or password is missing")
         result = FetchResult()
         mb = None
         try:
@@ -714,7 +737,7 @@ class MailFetcher:
                 raise RuntimeError(
                     "IMAP connection is already in LOGOUT state after connection.")
             if state != "SELECTED":
-                mb.folder.set(settings.imap_folder)
+                mb.folder.set(self.source.folder)
 
             # Get UIDVALIDITY from the SELECT response.
             # Do not issue an additional STATUS command to Zoho.
@@ -739,8 +762,8 @@ class MailFetcher:
             log.info("Search criteria: %s", criteria)
             uids = sorted(int(uid) for uid in mb.uids(criteria))
             date_range_mode = (
-                bool(settings.fetch_since_date)
-                and bool(settings.fetch_until_date)
+                bool(self.source.since)
+                and bool(self.source.until)
             )
             if not date_range_mode:
                 uids = [uid for uid in uids if uid > last_uid]
@@ -790,7 +813,7 @@ class MailFetcher:
                         )
 
                     if state != "SELECTED":
-                        mb.folder.set(settings.imap_folder)
+                        mb.folder.set(self.source.folder)
 
                     batch_last_uid = result.last_uid
 
@@ -959,14 +982,15 @@ class MailFetcher:
         # DATE RANGE MODE
         # ----------------------------------------------------
 
-        if (settings.fetch_since_date and settings.fetch_until_date):
+        if (self.source.since and self.source.until):
             since = datetime.strptime(
-                settings.fetch_since_date,
+                self.source.since,
                 "%Y-%m-%d",
             ).date()
-            until = datetime.strptime(settings.fetch_until_date, "%Y-%m-%d",).date()
+            until = datetime.strptime(self.source.until, "%Y-%m-%d",).date()
             log.info("Downloading emails from %s to %s",since,until,)
-            return AND(date_gte=since, date_lt=until,)
+            # IMAP's "before" excludes that day, so go one day further to include the "to" date.
+            return AND(date_gte=since, date_lt=until + timedelta(days=1),)
 
         # ----------------------------------------------------
         # NORMAL INCREMENTAL MODE
@@ -979,8 +1003,8 @@ class MailFetcher:
         # FIRST RUN WITH ONLY START DATE
         # ----------------------------------------------------
 
-        if settings.fetch_since_date:
-            since = datetime.strptime(settings.fetch_since_date, "%Y-%m-%d",).date()
+        if self.source.since:
+            since = datetime.strptime(self.source.since, "%Y-%m-%d",).date()
             return AND(date_gte=since,)
 
         # ----------------------------------------------------
@@ -1025,7 +1049,7 @@ class MailFetcher:
 
         email_date = msg.date or datetime.now()
         month_folder = email_date.strftime("%B-%Y")
-        email_account = _safe_folder_name(settings.imap_user)
+        email_account = _safe_folder_name(self.source.user)
         month_path = settings.cv_folder / email_account / month_folder
         month_path.mkdir(parents=True, exist_ok=True)
 
@@ -1066,7 +1090,7 @@ class MailFetcher:
                 "subject": msg.subject or "",
                 "mail_date": msg.date.isoformat() if msg.date else None,
                 "uid": int(msg.uid),
-                "folder": settings.imap_folder,
+                "folder": self.source.folder,
                 "downloaded_at": datetime.now().isoformat(timespec="seconds"),
                 "attachment_count": len(cv_attachments),
             }
@@ -1091,6 +1115,14 @@ class MailFetcher:
         # Save manifest first.
         # ----------------------------------------------------
         self.manifest.save()
+        if self.source.date_range:
+            # Going back over older mail must not move the "new mail since last fetch" marker.
+            entry = dict(self.state.get(self.key, {}))
+            entry["last_range_run"] = datetime.now().isoformat(timespec="seconds")
+            entry["last_range"] = f"{self.source.since} to {self.source.until}"
+            self.state.set(self.key, entry)
+            self.state.save()
+            return
         self.state.set(
             self.key,
             {
@@ -1105,11 +1137,17 @@ class MailFetcher:
 def fetch_cvs(
     reset: bool = False,
     progress: Optional[Callable[[int, int, str], None]] = None,
+    source: Optional[MailSource] = None,
 ) -> FetchResult:
     """
     Convenience function used by main.py / FastAPI. progress(done, total, current) counts mails.
+    Without a source it reads the mailbox in .env (the command line).
     """
-    return MailFetcher().run(reset=reset, progress=progress)
+    return MailFetcher(source).run(reset=reset, progress=progress)
+
+
+def mailbox_state_key(user: str, host: str, folder: str) -> str:
+    return f"{user}|{host}|{folder}"
 
 
 def list_cv_files(folder: Path) -> list[Path]:

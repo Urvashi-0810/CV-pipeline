@@ -113,7 +113,29 @@ class AppSettings(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
+    # The .env mailbox is copied into the mailboxes list once; after that the list is managed on screen.
+    mailboxes_imported: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+
     __table_args__ = (CheckConstraint("id", name="single_row"),)
+
+
+class Mailbox(Base):
+    """A mailbox CVs are fetched from. The app password is stored encrypted (MAILBOX_SECRET_KEY)."""
+    __tablename__ = "mailboxes"
+
+    id: Mapped[int] = _id()
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    host: Mapped[str] = mapped_column(Text, nullable=False, server_default="imap.zoho.in")
+    port: Mapped[int] = mapped_column(Integer, nullable=False, server_default="993")
+    password_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    default_folder: Mapped[str] = mapped_column(Text, nullable=False, server_default="INBOX")
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (Index("uq_mailboxes_email_host", func.lower(email), func.lower(host), unique=True),)
 
 
 class Candidate(Base):
@@ -137,6 +159,13 @@ class Candidate(Base):
     languages: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=EMPTY_ARRAY)
     experience_years: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 1))
     age: Mapped[Optional[int]] = mapped_column(SmallInteger)
+    gender: Mapped[Optional[str]] = mapped_column(Text)
+    nationality: Mapped[Optional[str]] = mapped_column(Text)
+    passport_expiry: Mapped[Optional[str]] = mapped_column(Text)
+    # ECR or ECNR, read from the passport's last page when the CV includes it.
+    passport_type: Mapped[Optional[str]] = mapped_column(Text)
+    # Jobs with dates, country and sector. The client's experience columns are calculated from it.
+    work_history: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=EMPTY_LIST)
 
     email_norm: Mapped[Optional[str]] = mapped_column(Text)
     phone_norm: Mapped[Optional[str]] = mapped_column(Text)
@@ -296,5 +325,6 @@ class PipelineRun(Base):
 def build_search_text(candidate: Candidate) -> str:
     """Everything the Talent Pool search box looks through, as one indexed column."""
     values = (candidate.full_name, candidate.email, candidate.phone, candidate.passport_number,
-              candidate.job_title, candidate.company, candidate.location, *(candidate.skills or []))
+              candidate.job_title, candidate.company, candidate.location, candidate.nationality,
+              *(candidate.skills or []))
     return " ".join(value for value in values if value)

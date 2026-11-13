@@ -115,6 +115,9 @@ export default function TalentAdminGate() {
           <NavLink to="/talent/admin/users" className="tab">
             Users
           </NavLink>
+          <NavLink to="/talent/admin/mailboxes" className="tab">
+            Mailboxes
+          </NavLink>
           <NavLink to="/talent/admin/settings" className="tab">
             Settings
           </NavLink>

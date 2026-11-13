@@ -16,6 +16,7 @@ import LoginPage from './pages/LoginPage'
 import MyProfilePage from './pages/MyProfilePage'
 import TalentAdminGate from './talent/admin/TalentAdminGate'
 import TalentAdminPasswordPage from './talent/admin/TalentAdminPasswordPage'
+import TalentAdminMailboxesPage from './talent/admin/TalentAdminMailboxesPage'
 import TalentAdminSettingsPage from './talent/admin/TalentAdminSettingsPage'
 import TalentAdminUsersPage from './talent/admin/TalentAdminUsersPage'
 import TalentGate from './talent/TalentGate'
@@ -65,6 +66,7 @@ export default function App() {
           <Route path="admin" element={<TalentAdminGate />}>
             <Route index element={<Navigate to="/talent/admin/users" replace />} />
             <Route path="users" element={<TalentAdminUsersPage />} />
+            <Route path="mailboxes" element={<TalentAdminMailboxesPage />} />
             <Route path="settings" element={<TalentAdminSettingsPage />} />
             <Route path="password" element={<TalentAdminPasswordPage />} />
           </Route>

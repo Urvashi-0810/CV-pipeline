@@ -5,9 +5,9 @@ Every route needs a Talent Pool login (added in main.py). Delete also needs Tale
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
-from fastapi import APIRouter, Header, Query, Response
+from fastapi import APIRouter, Depends, Header, Query, Response
 from pydantic import BaseModel
 
 from app.api.problems import ProblemError
@@ -44,9 +44,7 @@ def _busy(e: LaneBusy) -> ProblemError:
                         "Wait for it to finish, then try again.", task=e.task.to_dict())
 
 
-@router.get("/candidates")
-def list_candidates(
-    db: DbSession,
+def list_filters(
     search: str = "", trade: str = "", location: str = "",
     skills: str = Query("", description="comma separated; every skill must be present"),
     min_experience: Optional[float] = None, max_experience: Optional[float] = None,
@@ -55,15 +53,56 @@ def list_candidates(
     source: str = Query("", description='a mailbox, or "manual" for manual uploads'),
     needs_review: Optional[bool] = None,
     include_unknown: bool = Query(True, description="keep candidates with unknown experience or age"),
+    missing_client_fields: Optional[bool] = Query(None, description="true: only candidates extracted before the client's fields existed"),
+) -> dict:
+    """The Talent Pool list's filters, shared by the list and bulk re-extraction."""
+    return dict(search=search, trade=trade, location=location, skills=skills, min_experience=min_experience,
+                max_experience=max_experience, min_age=min_age, max_age=max_age, received_from=received_from,
+                received_to=received_to, source=source, needs_review=needs_review, include_unknown=include_unknown,
+                missing_client_fields=missing_client_fields)
+
+
+Filters = Annotated[dict, Depends(list_filters)]
+
+
+@router.get("/candidates")
+def list_candidates(
+    db: DbSession, filters: Filters,
     sort: Literal["name", "trade", "passport", "experience", "age", "location", "received"] = "received",
     order: Literal["asc", "desc"] = "desc",
     limit: int = Query(50, ge=1, le=service.MAX_PAGE), offset: int = Query(0, ge=0),
 ):
-    return service.list_candidates(
-        db, search=search, trade=trade, location=location, skills=skills, min_experience=min_experience,
-        max_experience=max_experience, min_age=min_age, max_age=max_age, received_from=received_from,
-        received_to=received_to, source=source, needs_review=needs_review, include_unknown=include_unknown,
-        sort=sort, order=order, limit=limit, offset=offset)
+    return service.list_candidates(db, sort=sort, order=order, limit=limit, offset=offset, **filters)
+
+
+def _start_reextract(ids: list[int]) -> dict:
+    try:
+        return tasks.submit("reextract", "pipeline", recorded("reextract", lambda p: service.reextract_candidates(ids, p)),
+                            {"candidates": len(ids)}, controllable=True).to_dict()
+    except LaneBusy as e:
+        raise _busy(e)
+
+
+@router.get("/reextract/count")
+def reextract_count(db: DbSession, filters: Filters):
+    """How many candidates a filtered re-extract would run the AI on (one AI call each)."""
+    return {"candidates": len(service.candidate_ids(db, **filters))}
+
+
+@router.post("/reextract")
+def reextract_filtered(db: DbSession, filters: Filters):
+    """Run the AI again on the newest CV of every candidate the filters match. A pausable background run."""
+    ids = service.candidate_ids(db, **filters)
+    if not ids:
+        raise ProblemError(400, "nothing-to-reextract", "No candidates match these filters")
+    return _start_reextract(ids)
+
+
+@router.post("/candidates/{candidate_id}/reextract")
+def reextract_one(candidate_id: int, db: DbSession):
+    """Run the AI again on this candidate's newest CV, to fill the client's fields."""
+    service._get(db, candidate_id)
+    return _start_reextract([candidate_id])
 
 
 @router.get("/filter-options")

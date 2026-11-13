@@ -4,12 +4,13 @@ import { TALENT_API_URL, talentApi } from '../api/talentClient'
 import { DownloadIcon, FileTextIcon, SearchIcon } from '../components/icons'
 import { Badge, Button, ErrorAlert, Pagination, formatDate, useDebounced } from '../components/ui'
 import TalentCandidateDrawer from './TalentCandidateDrawer'
+import TalentReextractModal from './TalentReextractModal'
 import TalentUploadModal from './TalentUploadModal'
 import TypeaheadInput from './TypeaheadInput'
 
 // URL keys are the API's own parameter names, so the list query is the URL's filters as they are.
 const FILTER_KEYS = ['search', 'trade', 'location', 'skills', 'min_experience', 'max_experience', 'min_age', 'max_age',
-  'received_from', 'received_to', 'source', 'needs_review', 'include_unknown']
+  'received_from', 'received_to', 'source', 'needs_review', 'include_unknown', 'missing_client_fields']
 const DEFAULT_LIMIT = 25
 const COLUMNS = [
   ['name', 'Name'], ['trade', 'Trade'], ['passport', 'Passport No.'], ['experience', 'Experience', 'num'],
@@ -39,6 +40,7 @@ export default function TalentPoolPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [uploading, setUploading] = useState(false)
+  const [reextracting, setReextracting] = useState(false)
 
   const sort = params.get('sort') || 'received'
   const order = params.get('order') || 'desc'
@@ -120,6 +122,10 @@ export default function TalentPoolPage() {
             title="Download the candidate Excel">
             <DownloadIcon /> Download Excel
           </a>
+          <Button variant="ghost" size="sm" onClick={() => setReextracting(true)}
+            title="Run the AI again on the candidates in the current filters, to fill the client's fields">
+            Re-extract with AI
+          </Button>
           <Button size="sm" onClick={() => setUploading(true)}>
             + Upload CV
           </Button>
@@ -187,6 +193,12 @@ export default function TalentPoolPage() {
             <option value="true">Needs review</option>
             <option value="false">Nothing to review</option>
           </select>
+          <select value={params.get('missing_client_fields') || ''} aria-label="Client fields"
+            onChange={(e) => updateParams({ missing_client_fields: e.target.value })}>
+            <option value="">Client fields: any</option>
+            <option value="true">Client fields missing</option>
+            <option value="false">Client fields filled</option>
+          </select>
           {hasFilters && (
             <Button variant="ghost" size="sm" onClick={() => {
               setSearchText('')
@@ -223,8 +235,11 @@ export default function TalentPoolPage() {
                   </td>
                   <td>{c.job_title || <span className="muted">—</span>}</td>
                   <td className="mono">{c.passport_number || <span className="muted">—</span>}</td>
-                  <td className="num">{c.experience_years ?? <span className="muted">—</span>}</td>
-                  <td className="num">{c.age ?? <span className="muted">—</span>}</td>
+                  <td className="num">
+                    {c.has_client_fields ? c.total_experience
+                      : c.experience_years != null ? `${c.experience_years} yrs` : <span className="muted">Not found</span>}
+                  </td>
+                  <td className="num">{c.age_text === 'Not found' ? <span className="muted">Not found</span> : c.age_text}</td>
                   <td>{c.location || <span className="muted">—</span>}</td>
                   <td className="num">{formatDate(c.received_at)}</td>
                   <td className="center" onClick={(e) => e.stopPropagation()}>
@@ -260,6 +275,12 @@ export default function TalentPoolPage() {
           onClose={() => updateParams({ candidate: '' }, { resetPage: false })}
           onChanged={refresh}
           onSwitch={openCandidate}
+        />
+      )}
+      {reextracting && (
+        <TalentReextractModal
+          filters={new URLSearchParams(FILTER_KEYS.filter((key) => params.get(key)).map((key) => [key, params.get(key)]))}
+          onClose={() => setReextracting(false)}
         />
       )}
       {uploading && (

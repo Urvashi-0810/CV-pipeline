@@ -111,6 +111,12 @@ class TaskManager:
             task.done, task.total, task.current = done, total, current
 
         def run():
+            if task.control is not None and task.control.cancel_requested:
+                # Cancelled while it was waiting in the queue: it never starts.
+                task.status, task.result = "cancelled", {"cancelled": True, "never_started": True}
+                task.current = ""
+                task.finished_at = datetime.now().isoformat(timespec="seconds")
+                return
             task.status = "running"
             task.current = ""
             task.started_at = datetime.now().isoformat(timespec="seconds")
@@ -130,11 +136,12 @@ class TaskManager:
         task.future = self._lane_pools.get(lane, self._pool).submit(run)
         return task
 
-    def _controlled(self, task_id: str) -> Task:
+    def _controlled(self, task_id: str, *, allow_queued: bool = False) -> Task:
         task = self._tasks.get(task_id)
         if task is None:
             raise KeyError(task_id)
-        if not task.controllable or task.status not in ("running", "paused"):
+        allowed = ("running", "paused", "queued") if allow_queued else ("running", "paused")
+        if not task.controllable or task.status not in allowed:
             raise TaskNotControllable(f"This {task.kind} task can't be paused or stopped now ({task.status}).")
         return task
 
@@ -151,7 +158,8 @@ class TaskManager:
         return task
 
     def cancel(self, task_id: str) -> Task:
-        task = self._controlled(task_id)
+        """Stops a running or paused task at its next safe point; a waiting one never starts."""
+        task = self._controlled(task_id, allow_queued=True)
         task.cancel_requested = True
         task.pause_requested = False
         task.control.cancel()

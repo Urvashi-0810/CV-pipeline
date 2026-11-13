@@ -28,6 +28,8 @@ os.environ.update(
     DOCLING_OCR="false",
     AWS_S3_BUCKET="", AWS_REGION="ap-south-1", AWS_S3_PREFIX="cvs",
     AWS_ACCESS_KEY_ID="test", AWS_SECRET_ACCESS_KEY="test",
+    # A fixed test key, so encrypting mailbox passwords never writes a key into the real .env.
+    MAILBOX_SECRET_KEY="dGVzdC1rZXktZm9yLW1haWxib3gtcGFzc3dvcmRzISE=",
     # Older names a real .env may use: blank, so they can never point the tests at a real bucket.
     S3_BUCKET_NAME="", S3_ACCESS_KEY_ID="", S3_SECRET_ACCESS_KEY="",
 )

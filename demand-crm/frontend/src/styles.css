@@ -805,3 +805,32 @@ details summary { cursor: pointer; color: var(--text-muted); }
 .pl-controlbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px; border-radius: var(--radius-lg); background: var(--canvas); border: 1px solid var(--border); }
 .pl-controlbar .btn { gap: 6px; }
 @media (max-width: 560px) { .pl-controlbar .btn { flex: 1 1 calc(50% - 8px); justify-content: center; } }
+
+/* ---------- talent pool: client sheet in the candidate panel ---------- */
+.talent-section-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.talent-client-sheet { grid-template-columns: 1fr; gap: 0; border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+.talent-client-row { display: grid; grid-template-columns: minmax(150px, 0.9fr) 1.1fr; gap: 12px; padding: 7px 12px; border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.talent-client-row:last-child { border-bottom: 0; }
+.talent-client-row:nth-child(odd) { background: var(--canvas); }
+.talent-client-row dt { color: var(--text-muted); font-weight: 500; }
+.talent-client-row dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.talent-client-row dd.muted { color: var(--text-muted); }
+
+/* ---------- talent pool: choosing a mailbox for a fetch ---------- */
+.pl-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--canvas); }
+.pl-option { display: flex; flex-direction: column; gap: 6px; font-size: var(--fs-sm); font-weight: 600; color: var(--text); min-width: 0; }
+.pl-option select { height: var(--control-h-sm); padding: 0 8px; font-size: var(--fs-sm); border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface); color: var(--text); min-width: 0; }
+.pl-option-wide { grid-column: 1 / -1; }
+.pl-option-error { font-weight: 400; color: var(--red); overflow-wrap: anywhere; }
+.pl-radio { display: flex; align-items: center; gap: 8px; font-weight: 400; color: var(--text-body); flex-wrap: wrap; }
+.pl-dates { flex-wrap: wrap; padding-left: 24px; }
+.pl-waiting { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px dashed var(--border-strong); border-radius: var(--radius-lg); }
+.pl-waiting ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.pl-waiting li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.pl-queue-more summary { cursor: pointer; color: var(--accent-text); font-weight: 600; }
+.pl-queue-more[open] summary { margin-bottom: 10px; }
+.pl-live-head p { margin: 2px 0 0; }
+@media (max-width: 640px) { .pl-options { grid-template-columns: 1fr; } }
+
+.talent-test-ok { color: var(--green); margin-top: 2px; }
+.talent-test-bad { color: var(--red); margin-top: 2px; overflow-wrap: anywhere; }

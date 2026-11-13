@@ -15,10 +15,10 @@ const MODES = [
 const PATHS = { fetch: '/fetch', extract: '/extract', run: '/run', 's3-retry': '/talent/s3/retry' }
 const NAMES = {
   fetch: 'Fetch mail', extract: 'Extract CVs', run: 'Fetch, then extract', upload: 'Manual upload',
-  delete: 'Deleting a candidate', 's3-retry': 'Retry S3 uploads',
+  delete: 'Deleting a candidate', 's3-retry': 'Retry S3 uploads', reextract: 'Re-extract with AI',
 }
 const ACTIVE = ['queued', 'running', 'paused']
-const CONTROLLABLE = ['fetch', 'extract', 'run', 's3-retry']
+const CONTROLLABLE = ['fetch', 'extract', 'run', 's3-retry', 'reextract']
 const POLL_MS = 1200
 const fmt = (n) => (n ?? 0).toLocaleString('en-IN')
 
@@ -49,6 +49,7 @@ function outcome(kind, s) {
     ]
   }
   if (kind === 's3-retry') return [['Uploaded', s.uploaded], ['Failed again', s.failed, 'bad'], ['No local file', s.no_local_file, 'bad']]
+  if (kind === 'reextract') return [['Candidates updated', s.updated], ['Failed', s.failed, 'bad'], ['No CV file', s.no_cv_file, 'bad']]
   return []
 }
 
@@ -86,6 +87,92 @@ function Numbers({ items }) {
   )
 }
 
+const dmy = (iso) => (iso ? iso.split('-').reverse().join('-') : '')
+
+// What a fetch reads: one mailbox, one of its folders, and either new mail or a date range.
+function FetchOptions({ mailboxes, value, onChange }) {
+  const [folders, setFolders] = useState([])
+  const [folderError, setFolderError] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const mailbox = mailboxes.find((m) => m.id === value.mailboxId)
+
+  useEffect(() => {
+    setFolders([])
+    setFolderError(null)
+    if (!mailbox) return
+    let stale = false
+    setLoading(true)
+    talentApi(`/mailboxes/${mailbox.id}/folders`)
+      .then((data) => !stale && setFolders(data.items))
+      .catch((err) => !stale && setFolderError(err))
+      .finally(() => !stale && setLoading(false))
+    return () => {
+      stale = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mailbox?.id])
+
+  if (!mailboxes.length) {
+    return (
+      <Alert tone="info" title="No mailboxes yet">
+        A Talent Pool admin adds them on <Link to="/talent/admin/mailboxes">Admin → Mailboxes</Link>.
+      </Alert>
+    )
+  }
+  const folderChoices = folders.length ? folders : [value.folder || mailbox?.default_folder].filter(Boolean)
+  const lastFetch = mailbox?.last_fetch?.[value.folder]
+  return (
+    <div className="pl-options">
+      <label className="pl-option">
+        <span>Mailbox</span>
+        <select value={value.mailboxId || ''} onChange={(e) => {
+          const next = mailboxes.find((m) => m.id === Number(e.target.value))
+          onChange({ ...value, mailboxId: next?.id, folder: next?.default_folder || 'INBOX' })
+        }}>
+          {mailboxes.map((m) => <option key={m.id} value={m.id}>{m.name} ({m.email})</option>)}
+        </select>
+      </label>
+      <label className="pl-option">
+        <span>Folder {loading && <span className="muted">· loading…</span>}</span>
+        <select value={value.folder} onChange={(e) => onChange({ ...value, folder: e.target.value })}>
+          {folderChoices.map((f) => <option key={f} value={f}>{f}</option>)}
+        </select>
+        {folderError && <span className="pl-option-error">Couldn't list folders: {folderError.message}</span>}
+      </label>
+      <div className="pl-option pl-option-wide" role="radiogroup" aria-label="Which mail">
+        <span>Which mail</span>
+        <label className="pl-radio">
+          <input type="radio" checked={value.period === 'new'} onChange={() => onChange({ ...value, period: 'new' })} />
+          New mail since the last fetch
+          <span className="muted small">{lastFetch ? ` (last fetched ${formatDateTime(lastFetch)})` : ' (never fetched: reads all mail)'}</span>
+        </label>
+        <label className="pl-radio">
+          <input type="radio" checked={value.period === 'range'} onChange={() => onChange({ ...value, period: 'range' })} />
+          A date range
+        </label>
+        {value.period === 'range' && (
+          <div className="date-range pl-dates">
+            <span>From</span>
+            <input type="date" aria-label="From date" value={value.since} onChange={(e) => onChange({ ...value, since: e.target.value })} />
+            <span>to</span>
+            <input type="date" aria-label="To date" value={value.until} min={value.since || undefined}
+              onChange={(e) => onChange({ ...value, until: e.target.value })} />
+            {value.since && value.until && <span className="muted small">{dmy(value.since)} to {dmy(value.until)}, both days included</span>}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// What the run reads, as one line: "Recruitment · INBOX · 01-01-2024 to 31-03-2024"
+function describeSource(about) {
+  const s = about?.fetch || about
+  if (!s?.mailbox) return null
+  const period = s.mode === 'range' ? `${dmy(s.since)} to ${dmy(s.until)}` : 'new mail'
+  return `${s.mailbox} · ${s.folder} · ${period}`
+}
+
 function ModePicker({ mode, setMode }) {
   return (
     <div className="pl-modes" role="radiogroup" aria-label="What to run">
@@ -108,7 +195,7 @@ function LiveRun({ task, onControl, busy, confirming, onConfirm }) {
   }, [])
 
   const percent = task.total ? Math.min(100, Math.round((100 * task.done) / task.total)) : null
-  const unit = task.kind === 'fetch' || task.kind === 'run' ? 'mails' : 'files'
+  const unit = task.kind === 'fetch' || task.kind === 'run' ? 'mails' : task.kind === 'reextract' ? 'candidates' : 'files'
   const state = stateOf(task)
   const stopping = task.cancel_requested
   const paused = task.status === 'paused'
@@ -116,7 +203,10 @@ function LiveRun({ task, onControl, busy, confirming, onConfirm }) {
   return (
     <div className="stack">
       <div className="pl-live-head">
-        <h3>{NAMES[task.kind] || task.kind}</h3>
+        <div>
+          <h3>{NAMES[task.kind] || task.kind}</h3>
+          {describeSource(task.params) && <p className="muted small">{describeSource(task.params)}</p>}
+        </div>
         <span className="muted small num">Elapsed {duration(task.started_at || task.created_at)}</span>
       </div>
 
@@ -158,7 +248,7 @@ function LiveRun({ task, onControl, busy, confirming, onConfirm }) {
 }
 
 // Always shown, so the controls are easy to find. Each is enabled only when it can be used.
-function ControlBar({ task, lastRun, mode, busy, onStart, onControl, onCancel, onRetry }) {
+function ControlBar({ task, lastRun, mode, busy, canQueue, onStart, onControl, onCancel, onRetry }) {
   const active = Boolean(task)
   const controllable = active && task.controllable === true && !task.cancel_requested
   const paused = active && (task.status === 'paused' || task.pause_requested)
@@ -167,8 +257,10 @@ function ControlBar({ task, lastRun, mode, busy, onStart, onControl, onCancel, o
   const chosen = MODES.find((m) => m.kind === mode)
   return (
     <div className="pl-controlbar" role="toolbar" aria-label="Run controls">
-      <Button disabled={active || busy} title={active ? 'A run is already in progress' : undefined} onClick={() => onStart(chosen.path)}>
-        <PlayIcon /> Start
+      <Button disabled={(active && !canQueue) || busy}
+        title={active ? (canQueue ? 'Starts when the current run finishes' : 'A run is already in progress') : undefined}
+        onClick={() => onStart(chosen.path)}>
+        <PlayIcon /> {active && canQueue ? 'Add to queue' : 'Start'}
       </Button>
       {paused ? (
         <Button variant="ghost" disabled={!controllable || busy} title={why} onClick={() => onControl('resume')}>
@@ -206,6 +298,7 @@ function Finished({ task, onRetry, onDone, busy }) {
     <div className="stack">
       <div className={`pl-outcome pl-outcome-${task.status}`}>
         <strong>{heading}</strong>
+        {describeSource(task.params) && <span className="small">{describeSource(task.params)}</span>}
         <span className="small">
           {task.status === 'cancelled' && 'Stopped with Cancel. Everything done before that is kept. '}
           {task.status === 'error' && `${task.error} `}
@@ -249,15 +342,27 @@ export default function TalentPipelinePage() {
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [mailboxes, setMailboxes] = useState([])
+  const [fetchOptions, setFetchOptions] = useState({ mailboxId: null, folder: 'INBOX', period: 'new', since: '', until: '' })
+  const [waiting, setWaiting] = useState([])
   const timer = useRef(null)
 
   const loadOverview = useCallback(async () => {
-    const [cfg, stat, recent] = await Promise.all([
-      talentApi('/config'), talentApi('/status'), talentApi('/pipeline/runs?limit=8'),
+    const [cfg, stat, recent, boxes] = await Promise.all([
+      talentApi('/config'), talentApi('/status'), talentApi('/pipeline/runs?limit=8'), talentApi('/mailboxes'),
     ])
     setConfig(cfg)
     setStatus(stat)
     setRuns(recent.items)
+    setMailboxes(boxes.items)
+    // Start with the first mailbox and its usual folder chosen.
+    setFetchOptions((o) => (o.mailboxId || !boxes.items.length ? o
+      : { ...o, mailboxId: boxes.items[0].id, folder: boxes.items[0].default_folder }))
+  }, [])
+
+  const loadWaiting = useCallback(async () => {
+    const all = await talentApi('/tasks')
+    setWaiting(all.filter((t) => t.lane === 'pipeline' && t.status === 'queued' && t.controllable))
   }, [])
 
   const watch = useCallback((id) => {
@@ -265,7 +370,14 @@ export default function TalentPipelinePage() {
     timer.current = setTimeout(async () => {
       try {
         const next = await talentApi(`/tasks/${id}`)
-        if (ACTIVE.includes(next.status)) {
+        loadWaiting().catch(() => {})
+        if (next.status === 'queued' && next.current) {
+          // Still waiting behind another run: follow that one instead.
+          const all = await talentApi('/tasks')
+          const running = all.find((t) => t.lane === 'pipeline' && ['running', 'paused'].includes(t.status))
+          setTask(running || next)
+          watch(running ? running.id : id)
+        } else if (ACTIVE.includes(next.status)) {
           setTask(next)
           watch(id)
         } else {
@@ -273,23 +385,28 @@ export default function TalentPipelinePage() {
           setConfirming(false)
           setFinished(next)
           loadOverview().catch(setError)
+          findActiveRef.current?.()                 // a queued fetch may start next
         }
       } catch (err) {
         setError(err)
       }
     }, POLL_MS)
-  }, [loadOverview])
+  }, [loadOverview, loadWaiting])
 
-  // Show a run started elsewhere (another PC, or before this page was opened).
+  // Show a run started elsewhere (another PC, or before this page was opened). Running beats waiting.
   const findActive = useCallback(async () => {
     const all = await talentApi('/tasks')
-    const active = all.find((t) => t.lane === 'pipeline' && ACTIVE.includes(t.status))
+    const pipeline = all.filter((t) => t.lane === 'pipeline')
+    const active = pipeline.find((t) => ['running', 'paused'].includes(t.status)) || pipeline.find((t) => t.status === 'queued')
+    setWaiting(pipeline.filter((t) => t.status === 'queued' && t.controllable && t.id !== active?.id))
     if (active) {
       setTask(active)
       watch(active.id)
     }
     return active
   }, [watch])
+  const findActiveRef = useRef(null)
+  findActiveRef.current = findActive
 
   useEffect(() => {
     loadOverview().catch(setError)
@@ -297,15 +414,37 @@ export default function TalentPipelinePage() {
     return () => clearTimeout(timer.current)
   }, [loadOverview, findActive])
 
-  async function start(path) {
+  // The body for a fetch: the chosen mailbox, folder and period (or those of a run being retried).
+  function fetchBody(source) {
+    if (source) {
+      const s = source.fetch || source
+      return { mailbox_id: s.mailbox_id, folder: s.folder, since: s.since || undefined, until: s.until || undefined }
+    }
+    const o = fetchOptions
+    if (!o.mailboxId) throw new Error('Choose a mailbox first.')
+    if (o.period === 'range' && !(o.since && o.until)) throw new Error('Choose both a from date and a to date.')
+    return { mailbox_id: o.mailboxId, folder: o.folder,
+      ...(o.period === 'range' ? { since: o.since, until: o.until } : {}) }
+  }
+
+  async function start(path, source) {
     setBusy(true)
     setError(null)
-    setFinished(null)
     try {
-      const started = await talentApi(path, { method: 'POST', body: {} })
-      setTask(started)
-      watch(started.id)
+      const body = path === '/fetch' || path === '/run' ? fetchBody(source) : {}
+      const started = await talentApi(path, { method: 'POST', body })
+      if (task) {
+        loadWaiting().catch(() => {})             // queued behind the current run
+      } else {
+        setFinished(null)
+        setTask(started)
+        watch(started.id)
+      }
     } catch (err) {
+      if (!err.status) {
+        setError({ title: err.message })
+        return
+      }
       if (err.status === 409 && (await findActive())) return    // something else is running: show it
       setError(err)
     } finally {
@@ -324,6 +463,17 @@ export default function TalentPipelinePage() {
       setBusy(false)
     }
   }
+
+  async function cancelWaiting(id) {
+    try {
+      await talentApi(`/tasks/${id}/cancel`, { method: 'POST' })
+      await loadWaiting()
+    } catch (err) {
+      setError(err)
+    }
+  }
+
+  const isFetch = mode === 'fetch' || mode === 'run'
 
   const talent = status?.talent
   const s3Problems = (talent?.s3_failed || 0) + (talent?.s3_missing || 0)
@@ -350,15 +500,41 @@ export default function TalentPipelinePage() {
             <h2>{running ? 'Current run' : finished ? 'Last run' : 'Start a run'}</h2>
           </header>
           <div className="pl-panel-body stack">
-            <ControlBar task={task} lastRun={lastRun} mode={mode} busy={busy} onStart={start} onControl={control}
-              onCancel={() => setConfirming(true)} onRetry={(kind) => start(PATHS[kind])} />
+            <ControlBar task={task} lastRun={lastRun} mode={mode} busy={busy} canQueue={isFetch}
+              onStart={start} onControl={control}
+              onCancel={() => setConfirming(true)} onRetry={(kind) => start(PATHS[kind], lastRun?.params || lastRun?.summary)} />
             {running ? (
-              <LiveRun task={task} onControl={control} busy={busy} confirming={confirming} onConfirm={setConfirming} />
+              <>
+                <LiveRun task={task} onControl={control} busy={busy} confirming={confirming} onConfirm={setConfirming} />
+                {waiting.length > 0 && (
+                  <div className="pl-waiting">
+                    <strong className="small">Waiting to start ({waiting.length})</strong>
+                    <ul>
+                      {waiting.map((w) => (
+                        <li key={w.id}>
+                          <span className="small">{NAMES[w.kind] || w.kind}{describeSource(w.params) ? ` · ${describeSource(w.params)}` : ''}</span>
+                          <Button variant="ghost" size="sm" onClick={() => cancelWaiting(w.id)}>Cancel</Button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <details className="pl-queue-more">
+                  <summary className="small">Queue another fetch</summary>
+                  <div className="stack-sm">
+                    <FetchOptions mailboxes={mailboxes} value={fetchOptions} onChange={setFetchOptions} />
+                    <div><Button size="sm" disabled={busy} onClick={() => start('/fetch')}>Add to queue</Button></div>
+                  </div>
+                </details>
+              </>
             ) : finished ? (
               <Finished task={finished} busy={busy} onDone={() => setFinished(null)}
-                onRetry={(kind) => start(PATHS[kind])} />
+                onRetry={(kind) => start(PATHS[kind], finished.params)} />
             ) : (
-              <ModePicker mode={mode} setMode={setMode} />
+              <>
+                <ModePicker mode={mode} setMode={setMode} />
+                {isFetch && <FetchOptions mailboxes={mailboxes} value={fetchOptions} onChange={setFetchOptions} />}
+              </>
             )}
           </div>
         </section>
@@ -371,8 +547,8 @@ export default function TalentPipelinePage() {
           <div className="pl-panel-body">
             {config ? (
               <ul className="pl-conns">
-                <Connection label="Mailbox" ok={config.imap.configured}
-                  detail={config.imap.configured ? `${config.imap.user} · ${config.imap.folder}` : 'Address or password missing'} />
+                <Connection label="Mailboxes" ok={config.mailboxes > 0}
+                  detail={config.mailboxes ? `${config.mailboxes} connected` : 'None yet: add them in Admin → Mailboxes'} />
                 <Connection label="AI model" ok={config.providers_configured?.[config.llm_provider]}
                   detail={`${config.llm_provider} · ${config.llm_provider === 'gemini' ? config.gemini_model : config.claude_model}${config.providers_configured?.[config.llm_provider] ? '' : ' · no API key'}`} />
                 <Connection label="S3 storage" ok={config.s3?.configured}
@@ -425,6 +601,7 @@ export default function TalentPipelinePage() {
                   <li key={r.id} className="pl-run">
                     <div className="pl-run-main">
                       <strong>{NAMES[r.kind] || r.kind}</strong>
+                      {describeSource(r.summary) && <span className="small">{describeSource(r.summary)}</span>}
                       <span className="muted small num">
                         {formatDateTime(r.started_at)} · {duration(r.started_at, r.finished_at)}
                       </span>

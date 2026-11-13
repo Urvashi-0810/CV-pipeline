@@ -30,5 +30,6 @@ def save_settings(body: SettingsUpdate, admin: AdminUser):
 
 
 @router.post("/test/{target}")
-def test_connection(target: Literal["mail", "s3", "database", "llm"], _: AdminUser):
+def test_connection(target: Literal["s3", "database", "llm"], _: AdminUser):
+    """Mailboxes are tested one by one on the Mailboxes tab."""
     return connection_tests.TESTS[target]()

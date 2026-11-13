@@ -269,7 +269,7 @@ def test_excel_has_one_row_per_cv_with_the_persons_current_values():
     edit(first.candidate_id, job_title="Lead Welder")
 
     assert regenerate_excel() == 2
-    df = pd.read_excel(settings.output_excel, sheet_name=SHEET, dtype=str)
+    df = pd.read_excel(settings.output_excel, sheet_name="All fields", dtype=str)
     assert list(df["Location"]) == ["Dubai", "Dubai"] and list(df["Current/Last Job Title"]) == ["Lead Welder"] * 2
     assert list(df["CV File"]) != [df["CV File"][0]] * 2 and df["Skills"][0] == "Welding"
 

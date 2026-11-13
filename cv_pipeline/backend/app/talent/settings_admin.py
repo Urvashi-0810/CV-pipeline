@@ -40,7 +40,7 @@ class SettingDef:
 
 GROUPS = [
     ("llm", "AI model (LLM)", "Which AI reads the CVs, and its API keys."),
-    ("mail", "Mailbox", "The mailbox CVs are fetched from."),
+    ("mail", "Mail filters", "Which mails count, for every mailbox. The mailboxes themselves are on the Mailboxes tab."),
     ("s3", "S3 storage", "Where CV files are stored. Keys need Put, Get, List and Delete on the bucket."),
     ("folders", "Folders", "Where files are kept on this computer."),
     ("database", "Database", "The Talent Pool's Postgres database."),
@@ -58,14 +58,7 @@ DEFS = [
     SettingDef("DOCLING_OCR", "llm", "Docling reads scanned pages (OCR)", "bool", "true",
                help="Only used when CVs reach the AI through docling."),
 
-    SettingDef("IMAP_HOST", "mail", "Mail server", "text", "imap.gmail.com"),
-    SettingDef("IMAP_PORT", "mail", "Port", "int", "993", minimum=1, maximum=65535),
-    SettingDef("IMAP_USER", "mail", "Mailbox address", "text"),
-    SettingDef("IMAP_PASSWORD", "mail", "Password (app password)", "secret"),
-    SettingDef("IMAP_FOLDER", "mail", "Folder", "text", "INBOX"),
-    SettingDef("FETCH_SINCE_DATE", "mail", "Fetch mail from", "date",
-               help="Leave blank to fetch everything new. A range needs both dates."),
-    SettingDef("FETCH_UNTIL_DATE", "mail", "Fetch mail until", "date"),
+    # The mailboxes themselves are managed on Admin > Mailboxes; these filters apply to all of them.
     SettingDef("SUBJECT_KEYWORDS", "mail", "Only subjects containing", "list",
                help="Comma separated. Blank means every subject."),
     SettingDef("FROM_FILTER", "mail", "Only from these senders", "list",
@@ -225,9 +218,6 @@ def _clean(definition: SettingDef, raw: Any) -> str:
 def _check_together(values: dict[str, str]) -> list[dict]:
     """Rules that involve two settings."""
     errors = []
-    since, until = values.get("FETCH_SINCE_DATE", ""), values.get("FETCH_UNTIL_DATE", "")
-    if since and until and since > until:
-        errors.append({"field": "FETCH_UNTIL_DATE", "message": "Must be on or after the from date."})
     origins = values.get("CORS_ORIGINS", "")
     for origin in (o for o in origins.split(",") if o):
         if not re.fullmatch(r"https?://[^/\s]+", origin):
