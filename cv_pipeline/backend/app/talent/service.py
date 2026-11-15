@@ -526,7 +526,19 @@ def delete_candidate(candidate_id: int) -> dict:
 # ---------- S3 retry ----------
 
 def retry_failed_uploads(progress: Callable[[int, int, str], None]) -> dict:
-    """Upload every CV whose S3 upload failed or whose file was missing from the bucket."""
+    """Upload every CV whose S3 upload failed or whose file was missing from the bucket.
+
+    First compares the bucket with the database, so files deleted from the bucket outside
+    this app (AWS console, another computer) are found and put back too.
+    """
+    bucket_keys = s3_store.list_cv_keys()
+    with session_scope() as session:
+        gone = [cv for cv in session.scalars(select(CvDocument).where(CvDocument.s3_status == "success"))
+                if cv.s3_key and cv.s3_key not in bucket_keys]
+        for cv in gone:
+            cv.s3_status = "missing"
+        if gone:
+            log.warning("%d CV file(s) marked success are missing from S3; uploading them again", len(gone))
     with session_scope() as session:
         todo = [(cv.id, cv.file_hash, cv.local_rel_path, cv.file_name) for cv in session.scalars(
             select(CvDocument).where(CvDocument.s3_status.in_(("failed", "missing", "pending"))))]

@@ -14,6 +14,7 @@ from app.llm.client import get_llm
 from app.storage.excel_store import candidate_to_row, load_candidates, upsert_rows
 from app.storage.s3_store import upload_cv_to_s3
 import re
+import tempfile
 import time
 import traceback
 
@@ -44,6 +45,7 @@ class ExtractResult:
     extracted: int = 0
     skipped_already_done: int = 0
     failed: int = 0
+    skipped_protected: int = 0       # password-protected PDFs: nobody can read them, so they aren't retried
     total_rows_in_excel: int = 0
     errors: dict[str, str] = field(default_factory=dict)
     # Per file hash: which candidate the CV joined and what it changed (talent database only)
@@ -118,20 +120,60 @@ def list_cv_files(folder: Path) -> list[Path]:
     )
 
 
+PROTECTED_MESSAGE = "Password-protected PDF: it can't be opened without its password, so it was skipped."
+
+
+class PasswordProtected(RuntimeError):
+    """The PDF needs a password to open. The AI services reject such files (Gemini: 400 INVALID_ARGUMENT)."""
+
+
+def _unlocked_copy(path: Path, workdir: Path) -> Optional[Path]:
+    """An encrypted PDF that opens without a password, rewritten without the encryption.
+
+    Returns None for files that aren't encrypted PDFs (they are sent as they are).
+    Raises PasswordProtected when a password is really needed.
+    """
+    if path.suffix.lower() != ".pdf":
+        return None
+    from pypdf import PdfReader, PdfWriter
+    try:
+        reader = PdfReader(str(path))
+        if not reader.is_encrypted:
+            return None
+        if not reader.decrypt(""):
+            raise PasswordProtected(PROTECTED_MESSAGE)
+        writer = PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
+    except PasswordProtected:
+        raise
+    except Exception:  # noqa: BLE001 - unreadable or damaged: let the AI try the original
+        log.debug("Could not check %s for encryption", path.name, exc_info=True)
+        return None
+    target = workdir / path.name
+    with target.open("wb") as fh:
+        writer.write(fh)
+    log.info("Unlocked %s (encrypted, but opens without a password)", path.name)
+    return target
+
+
 def extract_one(path: Path, provider: Optional[str] = None) -> tuple[Candidate, str, str]:
     """Extract one CV. Returns (candidate, method, text_sent). Raises on failure."""
     llm = get_llm(provider)
     system = cv_extraction_system_prompt()
 
-    # 1) decide what the LLM gets: the file itself (PDF/image) or text (DOCX / Docling)
-    text, file, method = converter.prepare_for_llm(path)
+    with tempfile.TemporaryDirectory() as workdir:
+        source = _unlocked_copy(path, Path(workdir)) or path
 
-    # 2) the LLM parses the resume and fills the Candidate schema
-    candidate = llm.extract(
-        Candidate, system,
-        text=f"CV CONTENT:\n\n{text[:MAX_TEXT_CHARS]}" if text.strip() else None,
-        file=file,
-    )
+        # 1) decide what the LLM gets: the file itself (PDF/image) or text (DOCX / Docling)
+        text, file, method = converter.prepare_for_llm(source)
+
+        # 2) the LLM parses the resume and fills the Candidate schema
+        candidate = llm.extract(
+            Candidate, system,
+            text=f"CV CONTENT:\n\n{text[:MAX_TEXT_CHARS]}" if text.strip() else None,
+            file=file,
+        )
     candidate.fill_age_from_dob()
     return candidate, method, text
 
@@ -187,7 +229,7 @@ def run_extraction(
             break
         digest = file_sha256(path)
         prev = processed.get(digest)
-        if prev and prev.get("status") == "ok" and not force:
+        if prev and prev.get("status") in ("ok", "skipped") and not force:
             res.skipped_already_done += 1
             continue
 
@@ -248,6 +290,14 @@ def run_extraction(
             log.info("  OK  %-30s exp=%s  (%s, %.1fs)", candidate.full_name,
                      candidate.total_experience_years, method, time.time() - t0)
             
+        except PasswordProtected as e:
+            # Not a failure to retry: without the password nobody can read it. Usually not a CV at all.
+            res.skipped_protected += 1
+            processed.set(digest, {
+                "status": "skipped", "file": path.name, "reason": str(e),
+                "at": datetime.now().isoformat(timespec="seconds"),
+            })
+            log.warning("  SKIP %s: %s", path.name, e)
         except Exception as e:  # noqa: BLE001 - one bad CV must not stop the batch
             res.failed += 1
             res.errors[path.name] = str(e)

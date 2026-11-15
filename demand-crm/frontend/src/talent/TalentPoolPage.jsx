@@ -4,7 +4,6 @@ import { TALENT_API_URL, talentApi } from '../api/talentClient'
 import { DownloadIcon, FileTextIcon, SearchIcon } from '../components/icons'
 import { Badge, Button, ErrorAlert, Pagination, formatDate, useDebounced } from '../components/ui'
 import TalentCandidateDrawer from './TalentCandidateDrawer'
-import TalentReextractModal from './TalentReextractModal'
 import TalentUploadModal from './TalentUploadModal'
 import TypeaheadInput from './TypeaheadInput'
 
@@ -40,7 +39,6 @@ export default function TalentPoolPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [uploading, setUploading] = useState(false)
-  const [reextracting, setReextracting] = useState(false)
 
   const sort = params.get('sort') || 'received'
   const order = params.get('order') || 'desc'
@@ -118,15 +116,11 @@ export default function TalentPoolPage() {
           </p>
         </div>
         <div className="page-actions">
-          <a className="btn btn-ghost btn-sm" href={`${TALENT_API_URL}/api/candidates/download`}
+          <a className="btn btn-ghost" href={`${TALENT_API_URL}/api/candidates/download`}
             title="Download the candidate Excel">
             <DownloadIcon /> Download Excel
           </a>
-          <Button variant="ghost" size="sm" onClick={() => setReextracting(true)}
-            title="Run the AI again on the candidates in the current filters, to fill the client's fields">
-            Re-extract with AI
-          </Button>
-          <Button size="sm" onClick={() => setUploading(true)}>
+          <Button onClick={() => setUploading(true)}>
             + Upload CV
           </Button>
         </div>
@@ -275,12 +269,6 @@ export default function TalentPoolPage() {
           onClose={() => updateParams({ candidate: '' }, { resetPage: false })}
           onChanged={refresh}
           onSwitch={openCandidate}
-        />
-      )}
-      {reextracting && (
-        <TalentReextractModal
-          filters={new URLSearchParams(FILTER_KEYS.filter((key) => params.get(key)).map((key) => [key, params.get(key)]))}
-          onClose={() => setReextracting(false)}
         />
       )}
       {uploading && (

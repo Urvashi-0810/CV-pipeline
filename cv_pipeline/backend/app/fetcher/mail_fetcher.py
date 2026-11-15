@@ -56,6 +56,7 @@ class FetchResult:
     # Fetch extracts each batch as it goes; these add up those extractions.
     cvs_extracted: int = 0
     cvs_failed: int = 0
+    cvs_skipped_protected: int = 0
     cvs_skipped_already_done: int = 0
     extraction_errors: dict[str, str] = field(default_factory=dict)
     # Set when a batch failed and the fetch stopped there. The next fetch carries on from that point.
@@ -899,6 +900,7 @@ class MailFetcher:
                         )
                         result.cvs_extracted += extraction_result.extracted
                         result.cvs_failed += extraction_result.failed
+                        result.cvs_skipped_protected += extraction_result.skipped_protected
                         result.cvs_skipped_already_done += extraction_result.skipped_already_done
                         result.extraction_errors.update(extraction_result.errors)
                         if extraction_result.cancelled:

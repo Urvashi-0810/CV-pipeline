@@ -10,6 +10,7 @@ import { useAuth } from './auth/AuthContext'
 import Layout from './components/Layout'
 import AdvertisementsPage from './pages/AdvertisementsPage'
 import ChatPage from './pages/ChatPage'
+import ClientPoolPage from './pages/ClientPoolPage'
 import DashboardPage from './pages/DashboardPage'
 import DemandListPage from './pages/DemandListPage'
 import LoginPage from './pages/LoginPage'
@@ -48,6 +49,7 @@ export default function App() {
         <Route path="/demands/:demandId/chat" element={<ChatPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/advertisements" element={<AdvertisementsPage />} />
+        <Route path="/clients" element={<ClientPoolPage />} />
         <Route path="/profile" element={<MyProfilePage />} />
         <Route path="/admin" element={<AdminGate />}>
           <Route index element={<Navigate to="/admin/approvals" replace />} />

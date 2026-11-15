@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { talentApi } from '../../api/talentClient'
-import { Alert, Badge, Button, Card, ErrorAlert, Field, fieldErrorsOf } from '../../components/ui'
+import { Alert, Badge, Button, Card, ErrorAlert, Field, InfoTip, fieldErrorsOf } from '../../components/ui'
 import { useTalentAdmin } from './TalentAdminGate'
 
 // Every Talent Pool setting, saved to the backend's .env. Talent Pool admin only.
@@ -143,7 +143,7 @@ export default function TalentAdminSettingsPage() {
         return (
           <Card key={group.id} title={group.label}
             actions={target && (
-              <Button variant="ghost" size="sm" disabled={test?.running || changeCount > 0}
+              <Button variant="ghost" disabled={test?.running || changeCount > 0}
                 title={changeCount > 0 ? 'Save your changes first' : undefined} onClick={() => runTest(target)}>
                 {test?.running ? 'Testing…' : TEST_LABELS[target]}
               </Button>
@@ -161,11 +161,14 @@ export default function TalentAdminSettingsPage() {
                     label={
                       <>
                         {s.label}
+                        <InfoTip label={`About ${s.label}`}>
+                          {[s.help, s.kind === 'list' && !s.help ? 'Comma separated.' : null].filter(Boolean).join(' ')}
+                          <span className="infotip-key">Saved as {s.key}</span>
+                        </InfoTip>
                         {s.restart && <> <Badge tone={s.pending_restart ? 'amber' : 'neutral'}>{s.pending_restart ? 'Waiting for restart' : 'Restart needed'}</Badge></>}
                       </>
                     }
-                    error={errors[s.key]}
-                    hint={[s.help, s.kind === 'list' && !s.help ? 'Comma separated.' : null, `${s.key}`].filter(Boolean).join(' · ')}>
+                    error={errors[s.key]}>
                     {(id) => (
                       <SettingInput id={id} setting={s} value={form[s.key] ?? ''}
                         onChange={(v) => setForm((f) => ({ ...f, [s.key]: v }))}

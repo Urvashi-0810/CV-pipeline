@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
-import { ColumnsIcon, FileTextIcon, GridIcon, MegaphoneIcon, ShieldIcon, UserIcon, UsersIcon } from './icons'
+import { BuildingIcon, ColumnsIcon, FileTextIcon, GridIcon, MegaphoneIcon, ShieldIcon, UserIcon, UsersIcon } from './icons'
 
 function initials(name) {
   return name
@@ -33,6 +33,9 @@ export default function Layout() {
           </NavLink>
           <NavLink to="/advertisements" className="nav-link">
             <MegaphoneIcon /> Create Advertisement
+          </NavLink>
+          <NavLink to="/clients" className="nav-link">
+            <BuildingIcon /> Client Pool
           </NavLink>
           <NavLink to="/profile" className="nav-link">
             <UserIcon /> My Profile

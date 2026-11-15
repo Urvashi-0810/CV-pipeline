@@ -1,20 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { talentApi } from '../api/talentClient'
-import { Alert, Badge, Button, ErrorAlert, formatDateTime } from '../components/ui'
+import { Alert, Badge, Button, Card, ConfirmModal, ErrorAlert, Field, formatDateTime } from '../components/ui'
 
 // Run fetch and extract, control them (pause, resume, cancel, retry) and see their history.
 // Open to any Talent Pool user. Pause and cancel act at safe points: after the current CV,
 // or between batches of 50 mails, so nothing is left half done.
+// Built only from the CRM's own components (Card, Button, Badge, Alert, ConfirmModal, segmented, kpi, table).
 
-const MODES = [
-  { kind: 'fetch', path: '/fetch', title: 'Fetch new mail', text: 'Download new CVs from the mailbox and extract them as they arrive.' },
-  { kind: 'extract', path: '/extract', title: 'Extract waiting CVs', text: 'Process CV files not done yet, including ones that failed before.' },
-  { kind: 'run', path: '/run', title: 'Fetch, then extract', text: 'Fetch new mail, then extract anything still waiting.' },
-]
 const PATHS = { fetch: '/fetch', extract: '/extract', run: '/run', 's3-retry': '/talent/s3/retry' }
 const NAMES = {
-  fetch: 'Fetch mail', extract: 'Extract CVs', run: 'Fetch, then extract', upload: 'Manual upload',
+  fetch: 'Fetch mail', extract: 'Extract CVs', run: 'Fetch CVs', upload: 'Manual upload',
   delete: 'Deleting a candidate', 's3-retry': 'Retry S3 uploads', reextract: 'Re-extract with AI',
 }
 const ACTIVE = ['queued', 'running', 'paused']
@@ -40,11 +36,13 @@ function outcome(kind, s) {
     return [
       ['Mails scanned', s.mails_scanned], ['CVs saved', s.attachments_saved], ['Duplicates skipped', s.duplicates_skipped],
       ['CVs extracted', s.cvs_extracted], ['CVs failed', s.cvs_failed, 'bad'],
+      ['Password-protected, skipped', s.cvs_skipped_protected || undefined],
     ]
   }
   if (kind === 'extract' || kind === 'extract-after') {
     return [
       [kind === 'extract' ? 'CVs extracted' : 'More CVs extracted', s.extracted], ['CVs failed', s.failed, 'bad'],
+      ['Password-protected, skipped', s.skipped_protected || undefined],
       ['Already done', s.skipped_already_done],
     ]
   }
@@ -54,22 +52,12 @@ function outcome(kind, s) {
 }
 
 function stateOf(task) {
-  if (!task) return { tone: 'idle', label: 'Idle' }
+  if (!task) return { tone: 'neutral', label: 'Idle' }
   if (task.cancel_requested && ACTIVE.includes(task.status)) return { tone: 'amber', label: 'Stopping' }
   if (task.status === 'paused') return { tone: 'amber', label: 'Paused' }
   if (task.pause_requested) return { tone: 'amber', label: 'Pausing' }
   if (task.status === 'queued') return { tone: 'blue', label: 'Waiting' }
   return { tone: 'blue', label: 'Running' }
-}
-
-function StatusPill({ task }) {
-  const { tone, label } = stateOf(task)
-  return (
-    <span className={`pl-pill pl-pill-${tone}`}>
-      <span className="pl-dot" aria-hidden="true" />
-      {task ? `${label} · ${NAMES[task.kind] || task.kind}` : label}
-    </span>
-  )
 }
 
 function Numbers({ items }) {
@@ -78,9 +66,9 @@ function Numbers({ items }) {
   return (
     <div className="pl-numbers">
       {shown.map(([label, value, bad]) => (
-        <div key={label} className={`pl-number ${bad && value ? 'pl-number-bad' : ''}`}>
-          <strong>{fmt(value)}</strong>
-          <span>{label}</span>
+        <div key={label} className="stat">
+          <div className="label">{label}</div>
+          <div className={`value ${bad && value ? 'pl-bad' : ''}`}>{fmt(value)}</div>
         </div>
       ))}
     </div>
@@ -122,44 +110,55 @@ function FetchOptions({ mailboxes, value, onChange }) {
   const folderChoices = folders.length ? folders : [value.folder || mailbox?.default_folder].filter(Boolean)
   const lastFetch = mailbox?.last_fetch?.[value.folder]
   return (
-    <div className="pl-options">
-      <label className="pl-option">
-        <span>Mailbox</span>
-        <select value={value.mailboxId || ''} onChange={(e) => {
-          const next = mailboxes.find((m) => m.id === Number(e.target.value))
-          onChange({ ...value, mailboxId: next?.id, folder: next?.default_folder || 'INBOX' })
-        }}>
-          {mailboxes.map((m) => <option key={m.id} value={m.id}>{m.name} ({m.email})</option>)}
-        </select>
-      </label>
-      <label className="pl-option">
-        <span>Folder {loading && <span className="muted">· loading…</span>}</span>
-        <select value={value.folder} onChange={(e) => onChange({ ...value, folder: e.target.value })}>
-          {folderChoices.map((f) => <option key={f} value={f}>{f}</option>)}
-        </select>
-        {folderError && <span className="pl-option-error">Couldn't list folders: {folderError.message}</span>}
-      </label>
-      <div className="pl-option pl-option-wide" role="radiogroup" aria-label="Which mail">
-        <span>Which mail</span>
-        <label className="pl-radio">
-          <input type="radio" checked={value.period === 'new'} onChange={() => onChange({ ...value, period: 'new' })} />
-          New mail since the last fetch
-          <span className="muted small">{lastFetch ? ` (last fetched ${formatDateTime(lastFetch)})` : ' (never fetched: reads all mail)'}</span>
-        </label>
-        <label className="pl-radio">
-          <input type="radio" checked={value.period === 'range'} onChange={() => onChange({ ...value, period: 'range' })} />
-          A date range
-        </label>
-        {value.period === 'range' && (
-          <div className="date-range pl-dates">
-            <span>From</span>
-            <input type="date" aria-label="From date" value={value.since} onChange={(e) => onChange({ ...value, since: e.target.value })} />
-            <span>to</span>
-            <input type="date" aria-label="To date" value={value.until} min={value.since || undefined}
-              onChange={(e) => onChange({ ...value, until: e.target.value })} />
-            {value.since && value.until && <span className="muted small">{dmy(value.since)} to {dmy(value.until)}, both days included</span>}
+    <div className="stack-sm">
+      <div className="talent-form-grid">
+        <Field label="Mailbox">
+          {(id) => (
+            <select id={id} value={value.mailboxId || ''} onChange={(e) => {
+              const next = mailboxes.find((m) => m.id === Number(e.target.value))
+              onChange({ ...value, mailboxId: next?.id, folder: next?.default_folder || 'INBOX' })
+            }}>
+              {mailboxes.map((m) => <option key={m.id} value={m.id}>{m.name} ({m.email})</option>)}
+            </select>
+          )}
+        </Field>
+        <Field label={loading ? 'Folder · loading…' : 'Folder'}
+          error={folderError ? `Couldn't list folders: ${folderError.message}` : null}>
+          {(id) => (
+            <select id={id} value={value.folder} onChange={(e) => onChange({ ...value, folder: e.target.value })}>
+              {folderChoices.map((f) => <option key={f} value={f}>{f}</option>)}
+            </select>
+          )}
+        </Field>
+      </div>
+      <div className="field">
+        <label>Which mail</label>
+        <div className="pl-row">
+          <div className="segmented" role="radiogroup" aria-label="Which mail">
+            <button type="button" role="radio" aria-checked={value.period === 'new'}
+              className={value.period === 'new' ? 'active' : ''} onClick={() => onChange({ ...value, period: 'new' })}>
+              New mail
+            </button>
+            <button type="button" role="radio" aria-checked={value.period === 'range'}
+              className={value.period === 'range' ? 'active' : ''} onClick={() => onChange({ ...value, period: 'range' })}>
+              Date range
+            </button>
           </div>
-        )}
+          {value.period === 'range' ? (
+            <div className="date-range">
+              <span>From</span>
+              <input type="date" aria-label="From date" value={value.since} onChange={(e) => onChange({ ...value, since: e.target.value })} />
+              <span>to</span>
+              <input type="date" aria-label="To date" value={value.until} min={value.since || undefined}
+                onChange={(e) => onChange({ ...value, until: e.target.value })} />
+            </div>
+          ) : null}
+        </div>
+        <p className="field-hint">
+          {value.period === 'range'
+            ? (value.since && value.until ? `${dmy(value.since)} to ${dmy(value.until)}, both days included.` : 'Choose both dates.')
+            : lastFetch ? `Mail since the last fetch (${formatDateTime(lastFetch)}).` : 'Never fetched from this folder: reads all of its mail.'}
+        </p>
       </div>
     </div>
   )
@@ -173,21 +172,10 @@ function describeSource(about) {
   return `${s.mailbox} · ${s.folder} · ${period}`
 }
 
-function ModePicker({ mode, setMode }) {
-  return (
-    <div className="pl-modes" role="radiogroup" aria-label="What to run">
-      {MODES.map((m) => (
-        <button key={m.kind} type="button" role="radio" aria-checked={mode === m.kind}
-          className={`pl-mode ${mode === m.kind ? 'is-selected' : ''}`} onClick={() => setMode(m.kind)}>
-          <strong>{m.title}</strong>
-          <span>{m.text}</span>
-        </button>
-      ))}
-    </div>
-  )
-}
+// A run's recorded mailbox, folder and dates, if it has them; otherwise a retry uses the choices on screen.
+const sourceOf = (about) => ((about?.fetch || about)?.mailbox_id ? about : undefined)
 
-function LiveRun({ task, onControl, busy, confirming, onConfirm }) {
+function LiveRun({ task }) {
   const [, tick] = useState(0)
   useEffect(() => {
     const timer = setInterval(() => tick((n) => n + 1), 1000)
@@ -197,47 +185,32 @@ function LiveRun({ task, onControl, busy, confirming, onConfirm }) {
   const percent = task.total ? Math.min(100, Math.round((100 * task.done) / task.total)) : null
   const unit = task.kind === 'fetch' || task.kind === 'run' ? 'mails' : task.kind === 'reextract' ? 'candidates' : 'files'
   const state = stateOf(task)
-  const stopping = task.cancel_requested
-  const paused = task.status === 'paused'
 
   return (
-    <div className="stack">
-      <div className="pl-live-head">
+    <div className="stack-sm">
+      <div className="pl-row pl-spread">
         <div>
-          <h3>{NAMES[task.kind] || task.kind}</h3>
-          {describeSource(task.params) && <p className="muted small">{describeSource(task.params)}</p>}
+          <strong>{NAMES[task.kind] || task.kind}</strong>
+          {describeSource(task.params) && <div className="muted small">{describeSource(task.params)}</div>}
         </div>
         <span className="muted small num">Elapsed {duration(task.started_at || task.created_at)}</span>
       </div>
-
-      <div className={`pl-bar pl-bar-${state.tone}`} role="progressbar" aria-valuemin={0} aria-valuemax={100}
+      <div className={`pl-bar ${state.tone === 'amber' ? 'pl-bar-amber' : ''}`} role="progressbar" aria-valuemin={0} aria-valuemax={100}
         aria-valuenow={percent ?? undefined} aria-label="Progress">
         <div className={`pl-bar-fill ${percent === null ? 'is-unknown' : ''}`} style={{ width: `${percent ?? 100}%` }} />
       </div>
-      <div className="pl-live-meta">
+      <div className="pl-row pl-spread small">
         <span className="num">
           {task.total ? `${fmt(task.done)} of ${fmt(task.total)} ${unit}` : task.status === 'queued' ? 'Waiting to start' : 'Starting…'}
         </span>
         {percent !== null && <strong className="num">{percent}%</strong>}
       </div>
-      <p className="pl-current">
-        {stopping ? 'Stopping after the current CV. Everything finished so far is kept.'
-          : paused ? 'Paused. Nothing is being processed. Resume to carry on from here.'
+      <p className="muted small pl-current">
+        {task.cancel_requested ? 'Stopping after the current CV. Everything finished so far is kept.'
+          : task.status === 'paused' ? 'Paused. Nothing is being processed. Resume to carry on from here.'
             : task.pause_requested ? 'Pausing after the current CV…'
               : task.current || 'Starting…'}
       </p>
-
-      {confirming && (
-        <div className="pl-confirm" role="alertdialog" aria-label="Stop this run?">
-          <span>Stop this run after the current CV? What's done so far is kept, and the next run carries on from there.</span>
-          <div className="pl-actions">
-            <Button variant="ghost" size="sm" onClick={() => onConfirm(false)}>Keep running</Button>
-            <Button variant="danger-solid" size="sm" disabled={busy} onClick={() => { onConfirm(false); onControl('cancel') }}>
-              Stop run
-            </Button>
-          </div>
-        </div>
-      )}
       {task.controllable === undefined && CONTROLLABLE.includes(task.kind) && (
         <Alert title="Pause and Cancel need a server restart">
           The Talent Pool server is running an older version. Restart it (python main.py serve) to use Pause and Cancel.
@@ -247,74 +220,22 @@ function LiveRun({ task, onControl, busy, confirming, onConfirm }) {
   )
 }
 
-// Always shown, so the controls are easy to find. Each is enabled only when it can be used.
-function ControlBar({ task, lastRun, mode, busy, canQueue, onStart, onControl, onCancel, onRetry }) {
-  const active = Boolean(task)
-  const controllable = active && task.controllable === true && !task.cancel_requested
-  const paused = active && (task.status === 'paused' || task.pause_requested)
-  const retryable = !active && lastRun && PATHS[lastRun.kind]
-  const why = !active ? 'No run in progress' : !controllable ? (task.cancel_requested ? 'Already stopping' : 'This run cannot be paused or stopped') : undefined
-  const chosen = MODES.find((m) => m.kind === mode)
-  return (
-    <div className="pl-controlbar" role="toolbar" aria-label="Run controls">
-      <Button disabled={(active && !canQueue) || busy}
-        title={active ? (canQueue ? 'Starts when the current run finishes' : 'A run is already in progress') : undefined}
-        onClick={() => onStart(chosen.path)}>
-        <PlayIcon /> {active && canQueue ? 'Add to queue' : 'Start'}
-      </Button>
-      {paused ? (
-        <Button variant="ghost" disabled={!controllable || busy} title={why} onClick={() => onControl('resume')}>
-          <PlayIcon /> Resume
-        </Button>
-      ) : (
-        <Button variant="ghost" disabled={!controllable || busy || task?.status === 'queued'} title={why} onClick={() => onControl('pause')}>
-          <PauseIcon /> Pause
-        </Button>
-      )}
-      <Button variant="danger" disabled={!controllable || busy} title={why} onClick={onCancel}>
-        <StopIcon /> Cancel
-      </Button>
-      <Button variant="ghost" disabled={!retryable || busy}
-        title={active ? 'Wait for the current run to finish' : !lastRun ? 'No earlier run' : undefined}
-        onClick={() => onRetry(lastRun.kind)}>
-        <RetryIcon /> {lastRun && !active ? `Retry: ${(NAMES[lastRun.kind] || lastRun.kind).toLowerCase()}` : 'Retry last run'}
-      </Button>
-    </div>
-  )
-}
-
-const icon = { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }
-const PlayIcon = () => <svg {...icon}><path d="M7 4v16l13-8z" fill="currentColor" stroke="none" /></svg>
-const PauseIcon = () => <svg {...icon}><path d="M8 5v14M16 5v14" /></svg>
-const StopIcon = () => <svg {...icon}><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor" stroke="none" /></svg>
-const RetryIcon = () => <svg {...icon}><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4h4" /></svg>
-
-function Finished({ task, onRetry, onDone, busy }) {
+function Finished({ task }) {
   const name = NAMES[task.kind] || task.kind
   const heading = { done: `${name} finished`, cancelled: `${name} stopped`, error: `${name} failed` }[task.status]
+  const tone = { done: 'success', cancelled: 'info', error: 'error' }[task.status]
   const result = task.result || {}
   const stoppedEarly = result.stopped_early || result.fetch?.stopped_early
   return (
-    <div className="stack">
-      <div className={`pl-outcome pl-outcome-${task.status}`}>
-        <strong>{heading}</strong>
-        {describeSource(task.params) && <span className="small">{describeSource(task.params)}</span>}
-        <span className="small">
-          {task.status === 'cancelled' && 'Stopped with Cancel. Everything done before that is kept. '}
-          {task.status === 'error' && `${task.error} `}
-          Took {duration(task.started_at || task.created_at, task.finished_at)}.
-        </span>
-      </div>
+    <div className="stack-sm">
+      <Alert tone={tone} title={heading}>
+        {describeSource(task.params) && <>{describeSource(task.params)}. </>}
+        {task.status === 'cancelled' && 'Stopped with Cancel. Everything done before that is kept. '}
+        {task.status === 'error' && `${task.error} `}
+        Took {duration(task.started_at || task.created_at, task.finished_at)}.
+      </Alert>
       {stoppedEarly && <Alert title="The mail fetch stopped early">{stoppedEarly}. Retry to carry on from there.</Alert>}
       <Numbers items={outcome(task.kind, result)} />
-      <div className="pl-actions">
-        {PATHS[task.kind] && (
-          <Button disabled={busy} onClick={() => onRetry(task.kind)}>
-            {task.status === 'done' ? 'Run again' : 'Retry'}
-          </Button>
-        )}
-        <Button variant="ghost" onClick={onDone}>Done</Button>
-      </div>
     </div>
   )
 }
@@ -332,16 +253,26 @@ function Connection({ label, ok, detail }) {
   )
 }
 
+function Kpi({ label, value, tone, children }) {
+  return (
+    <div className={`kpi ${tone ? `pl-kpi-${tone}` : ''}`}>
+      <span className="kpi-label">{label}</span>
+      <span className="kpi-value">{value}</span>
+      {children}
+    </div>
+  )
+}
+
 export default function TalentPipelinePage() {
   const [config, setConfig] = useState(null)
   const [status, setStatus] = useState(null)
   const [runs, setRuns] = useState([])
   const [task, setTask] = useState(null)
   const [finished, setFinished] = useState(null)
-  const [mode, setMode] = useState('fetch')
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [queueing, setQueueing] = useState(false)
   const [mailboxes, setMailboxes] = useState([])
   const [fetchOptions, setFetchOptions] = useState({ mailboxId: null, folder: 'INBOX', period: 'new', since: '', until: '' })
   const [waiting, setWaiting] = useState([])
@@ -434,6 +365,7 @@ export default function TalentPipelinePage() {
       const body = path === '/fetch' || path === '/run' ? fetchBody(source) : {}
       const started = await talentApi(path, { method: 'POST', body })
       if (task) {
+        setQueueing(false)
         loadWaiting().catch(() => {})             // queued behind the current run
       } else {
         setFinished(null)
@@ -473,14 +405,18 @@ export default function TalentPipelinePage() {
     }
   }
 
-  const isFetch = mode === 'fetch' || mode === 'run'
-
   const talent = status?.talent
   const s3Problems = (talent?.s3_failed || 0) + (talent?.s3_missing || 0)
   const failedFiles = status?.failed || []
+  // CV files on disk not extracted yet: failed ones, ones left by a Cancel, or ones copied in by hand.
+  const waitingFiles = Math.max(0, (status?.cv_files || 0) - (status?.extracted_ok || 0))
   const running = Boolean(task)
   // Retry repeats the last run that failed or was stopped (or just ended), from this page or the history.
   const lastRun = finished || runs.find((r) => r.status !== 'running') || null
+  const retryLast = () => start(PATHS[lastRun.kind], sourceOf(lastRun.params) || sourceOf(lastRun.summary))
+  const state = stateOf(task)
+  const controllable = running && task.controllable === true && !task.cancel_requested
+  const paused = running && (task.status === 'paused' || task.pause_requested)
 
   return (
     <div className="stack pl-page">
@@ -489,167 +425,221 @@ export default function TalentPipelinePage() {
           <h1 className="page-title">Pipeline</h1>
           <p className="muted small">Bring new CVs in from the mailbox and turn them into candidates.</p>
         </div>
-        <StatusPill task={task} />
+        <Badge tone={state.tone}>{task ? `${state.label} · ${NAMES[task.kind] || task.kind}` : state.label}</Badge>
       </div>
 
       <ErrorAlert error={error} />
 
       <div className="pl-top">
-        <section className="card pl-panel">
-          <header className="pl-panel-head">
-            <h2>{running ? 'Current run' : finished ? 'Last run' : 'Start a run'}</h2>
-          </header>
-          <div className="pl-panel-body stack">
-            <ControlBar task={task} lastRun={lastRun} mode={mode} busy={busy} canQueue={isFetch}
-              onStart={start} onControl={control}
-              onCancel={() => setConfirming(true)} onRetry={(kind) => start(PATHS[kind], lastRun?.params || lastRun?.summary)} />
-            {running ? (
-              <>
-                <LiveRun task={task} onControl={control} busy={busy} confirming={confirming} onConfirm={setConfirming} />
-                {waiting.length > 0 && (
-                  <div className="pl-waiting">
-                    <strong className="small">Waiting to start ({waiting.length})</strong>
-                    <ul>
-                      {waiting.map((w) => (
-                        <li key={w.id}>
-                          <span className="small">{NAMES[w.kind] || w.kind}{describeSource(w.params) ? ` · ${describeSource(w.params)}` : ''}</span>
-                          <Button variant="ghost" size="sm" onClick={() => cancelWaiting(w.id)}>Cancel</Button>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
+        <Card title={running ? 'Current run' : finished ? 'Last run' : 'Fetch CVs'}>
+          {running ? (
+            <>
+              <LiveRun task={task} />
+              <div className="row-end">
+                {paused ? (
+                  <Button variant="ghost" disabled={!controllable || busy} onClick={() => control('resume')}>Resume</Button>
+                ) : (
+                  <Button variant="ghost" disabled={!controllable || busy || task.status === 'queued'} onClick={() => control('pause')}>
+                    Pause
+                  </Button>
                 )}
-                <details className="pl-queue-more">
-                  <summary className="small">Queue another fetch</summary>
-                  <div className="stack-sm">
-                    <FetchOptions mailboxes={mailboxes} value={fetchOptions} onChange={setFetchOptions} />
-                    <div><Button size="sm" disabled={busy} onClick={() => start('/fetch')}>Add to queue</Button></div>
-                  </div>
-                </details>
-              </>
-            ) : finished ? (
-              <Finished task={finished} busy={busy} onDone={() => setFinished(null)}
-                onRetry={(kind) => start(PATHS[kind], finished.params)} />
-            ) : (
-              <>
-                <ModePicker mode={mode} setMode={setMode} />
-                {isFetch && <FetchOptions mailboxes={mailboxes} value={fetchOptions} onChange={setFetchOptions} />}
-              </>
-            )}
-          </div>
-        </section>
+                <Button variant="danger" disabled={!controllable || busy} onClick={() => setConfirming(true)}>Cancel run</Button>
+              </div>
 
-        <section className="card pl-panel">
-          <header className="pl-panel-head">
-            <h2>Connections</h2>
-            <Link className="small" to="/talent/admin/settings">Settings</Link>
-          </header>
-          <div className="pl-panel-body">
-            {config ? (
-              <ul className="pl-conns">
-                <Connection label="Mailboxes" ok={config.mailboxes > 0}
-                  detail={config.mailboxes ? `${config.mailboxes} connected` : 'None yet: add them in Admin → Mailboxes'} />
-                <Connection label="AI model" ok={config.providers_configured?.[config.llm_provider]}
-                  detail={`${config.llm_provider} · ${config.llm_provider === 'gemini' ? config.gemini_model : config.claude_model}${config.providers_configured?.[config.llm_provider] ? '' : ' · no API key'}`} />
-                <Connection label="S3 storage" ok={config.s3?.configured}
-                  detail={config.s3?.configured ? `${config.s3.bucket}${config.s3.region ? ` · ${config.s3.region}` : ''}` : 'No bucket set'} />
-                <Connection label="Database" ok={Boolean(talent)}
-                  detail={talent ? `${fmt(talent.candidates)} candidates` : 'Not connected'} />
-              </ul>
-            ) : (
-              <p className="muted">Loading…</p>
-            )}
-          </div>
-        </section>
+              {waiting.length > 0 && (
+                <div className="stack-sm">
+                  <h3 className="talent-section-title">Waiting to start ({waiting.length})</h3>
+                  <table className="table table-compact">
+                    <tbody>
+                      {waiting.map((w) => (
+                        <tr key={w.id}>
+                          <td>
+                            {NAMES[w.kind] || w.kind}
+                            {describeSource(w.params) && <div className="muted small">{describeSource(w.params)}</div>}
+                          </td>
+                          <td className="row-actions">
+                            <Button variant="ghost" size="sm" onClick={() => cancelWaiting(w.id)}>Cancel</Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {queueing ? (
+                <div className="stack-sm">
+                  <h3 className="talent-section-title">Queue another fetch</h3>
+                  <FetchOptions mailboxes={mailboxes} value={fetchOptions} onChange={setFetchOptions} />
+                  <div className="row-end">
+                    <Button variant="ghost" onClick={() => setQueueing(false)}>Cancel</Button>
+                    <Button disabled={busy || !mailboxes.length} onClick={() => start('/run')}>Add to queue</Button>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <Button variant="ghost" size="sm" onClick={() => setQueueing(true)}>+ Queue another fetch</Button>
+                </div>
+              )}
+            </>
+          ) : finished ? (
+            <>
+              <Finished task={finished} />
+              <div className="row-end">
+                <Button variant="ghost" onClick={() => setFinished(null)}>Done</Button>
+                {PATHS[finished.kind] && (
+                  <Button disabled={busy} onClick={() => start(PATHS[finished.kind], sourceOf(finished.params))}>
+                    {finished.status === 'done' ? 'Run again' : 'Retry'}
+                  </Button>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="muted small">
+                Downloads the CVs from the chosen mailbox and folder and adds them to the Talent Pool. Files left over
+                from earlier runs are picked up too.
+              </p>
+              <FetchOptions mailboxes={mailboxes} value={fetchOptions} onChange={setFetchOptions} />
+              <div className="row-end">
+                {lastRun && PATHS[lastRun.kind] && (
+                  <Button variant="ghost" disabled={busy} onClick={retryLast}
+                    title={describeSource(lastRun.params || lastRun.summary) || undefined}>
+                    Retry last run
+                  </Button>
+                )}
+                <Button disabled={busy || !mailboxes.length} onClick={() => start('/run')}>
+                  {busy ? 'Starting…' : 'Fetch CVs'}
+                </Button>
+              </div>
+            </>
+          )}
+        </Card>
+
+        <Card title="Connections" actions={<Link className="btn btn-ghost" to="/talent/admin/settings">Settings</Link>}>
+          {config ? (
+            <ul className="pl-conns">
+              <Connection label="Mailboxes" ok={config.mailboxes > 0}
+                detail={config.mailboxes ? `${config.mailboxes} connected` : 'None yet: add them in Admin → Mailboxes'} />
+              <Connection label="AI model" ok={config.providers_configured?.[config.llm_provider]}
+                detail={`${config.llm_provider} · ${config.llm_provider === 'gemini' ? config.gemini_model : config.claude_model}${config.providers_configured?.[config.llm_provider] ? '' : ' · no API key'}`} />
+              <Connection label="S3 storage" ok={config.s3?.configured}
+                detail={config.s3?.configured ? `${config.s3.bucket}${config.s3.region ? ` · ${config.s3.region}` : ''}` : 'No bucket set'} />
+              <Connection label="Database" ok={Boolean(talent)}
+                detail={talent ? `${fmt(talent.candidates)} candidates` : 'Not connected'} />
+            </ul>
+          ) : (
+            <p className="muted">Loading…</p>
+          )}
+        </Card>
       </div>
 
       <section className="pl-tiles" aria-label="Status">
-        <div className="pl-tile"><strong>{fmt(status?.cv_files)}</strong><span>CV files on disk</span></div>
-        <div className="pl-tile"><strong>{fmt(status?.extracted_ok)}</strong><span>Extracted</span></div>
-        <div className="pl-tile"><strong>{talent ? fmt(talent.candidates) : '—'}</strong><span>Candidates</span></div>
-        <div className={`pl-tile ${talent?.needs_review ? 'is-warn' : ''}`}>
-          <strong>{talent ? fmt(talent.needs_review) : '—'}</strong>
-          <span>Need review</span>
-          {talent?.needs_review > 0 && <Link className="small" to="/talent?needs_review=true">Review</Link>}
-        </div>
-        <div className={`pl-tile ${failedFiles.length ? 'is-bad' : ''}`}>
-          <strong>{fmt(failedFiles.length)}</strong><span>Failed files</span>
-        </div>
-        <div className={`pl-tile ${s3Problems ? 'is-bad' : ''}`}>
-          <strong>{talent ? fmt(s3Problems) : '—'}</strong>
-          <span>Not in S3</span>
-          {s3Problems > 0 && (
-            <button type="button" className="link-btn small" disabled={running || busy} onClick={() => start(PATHS['s3-retry'])}>
-              Retry uploads
-            </button>
-          )}
-        </div>
+        <Kpi label="CV files on disk" value={fmt(status?.cv_files)} />
+        <Kpi label="Extracted" value={fmt(status?.extracted_ok)} />
+        <Kpi label="Candidates" value={talent ? fmt(talent.candidates) : '—'} />
+        <Kpi label="Need review" value={talent ? fmt(talent.needs_review) : '—'} tone={talent?.needs_review ? 'warn' : null}>
+          {talent?.needs_review > 0 && <Link className="small" to="/talent?needs_review=true">Review them</Link>}
+        </Kpi>
+        <Kpi label="Failed files" value={fmt(failedFiles.length)} tone={failedFiles.length ? 'bad' : null} />
+        <Kpi label="Not in S3" value={talent ? fmt(s3Problems) : '—'} tone={s3Problems ? 'bad' : null}>
+          <div>
+            <Button variant="ghost" size="sm" disabled={running || busy} onClick={() => start(PATHS['s3-retry'])}
+              title="Compares the bucket with the Talent Pool and uploads any CV that's missing, from this computer">
+              {s3Problems > 0 ? 'Retry uploads' : 'Check S3'}
+            </Button>
+          </div>
+        </Kpi>
       </section>
 
       <div className="pl-bottom">
-        <section className="card pl-panel">
-          <header className="pl-panel-head"><h2>Run history</h2></header>
+        <Card title="Run history">
           {runs.length === 0 ? (
-            <p className="pl-panel-body muted">No runs yet. Runs started here appear in this list.</p>
+            <p className="muted">No runs yet. Runs started here appear in this list.</p>
           ) : (
-            <ul className="pl-history">
-              {runs.map((r) => {
-                const tone = { done: 'green', cancelled: 'amber', error: 'red', running: 'blue' }[r.status]
-                const label = { done: 'Finished', cancelled: 'Stopped', error: 'Failed', running: 'Running' }[r.status]
-                const numbers = outcome(r.kind, r.summary).filter(([, v]) => v).slice(0, 3)
-                return (
-                  <li key={r.id} className="pl-run">
-                    <div className="pl-run-main">
-                      <strong>{NAMES[r.kind] || r.kind}</strong>
-                      {describeSource(r.summary) && <span className="small">{describeSource(r.summary)}</span>}
-                      <span className="muted small num">
-                        {formatDateTime(r.started_at)} · {duration(r.started_at, r.finished_at)}
-                      </span>
-                      <span className="small">
-                        {r.status === 'error' ? r.summary?.error
-                          : numbers.length ? numbers.map(([label, v]) => `${fmt(v)} ${label.toLowerCase()}`).join(' · ')
-                            : 'Nothing new'}
-                      </span>
-                    </div>
-                    <div className="pl-run-side">
-                      <Badge tone={tone}>{label}</Badge>
-                      {(r.status === 'error' || r.status === 'cancelled') && PATHS[r.kind] && (
-                        <Button variant="ghost" size="sm" disabled={running || busy} onClick={() => start(PATHS[r.kind])}>
-                          Retry
-                        </Button>
-                      )}
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
+            <div className="table-wrap">
+              <table className="table table-compact">
+                <thead>
+                  <tr>
+                    <th>Run</th>
+                    <th>Result</th>
+                    <th>Status</th>
+                    <th aria-label="Actions" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {runs.map((r) => {
+                    const tone = { done: 'green', cancelled: 'amber', error: 'red', running: 'blue' }[r.status]
+                    const label = { done: 'Finished', cancelled: 'Stopped', error: 'Failed', running: 'Running' }[r.status]
+                    const numbers = outcome(r.kind, r.summary).filter(([, v]) => v).slice(0, 3)
+                    return (
+                      <tr key={r.id}>
+                        <td>
+                          <strong>{NAMES[r.kind] || r.kind}</strong>
+                          {describeSource(r.summary) && <div className="small">{describeSource(r.summary)}</div>}
+                          <div className="muted small num">{formatDateTime(r.started_at)} · {duration(r.started_at, r.finished_at)}</div>
+                        </td>
+                        <td className="small pl-wrap">
+                          {r.status === 'error' ? r.summary?.error
+                            : numbers.length ? numbers.map(([name, v]) => `${fmt(v)} ${name.toLowerCase()}`).join(' · ')
+                              : 'Nothing new'}
+                        </td>
+                        <td><Badge tone={tone}>{label}</Badge></td>
+                        <td className="row-actions">
+                          {(r.status === 'error' || r.status === 'cancelled') && PATHS[r.kind] && (
+                            <Button variant="ghost" size="sm" disabled={running || busy} onClick={() => start(PATHS[r.kind], sourceOf(r.summary))}>
+                              Retry
+                            </Button>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
-        </section>
+        </Card>
 
-        <section className="card pl-panel">
-          <header className="pl-panel-head">
-            <h2>Failed files {failedFiles.length > 0 && <Badge tone="red">{failedFiles.length}</Badge>}</h2>
-            {failedFiles.length > 0 && (
-              <Button variant="ghost" size="sm" disabled={running || busy} onClick={() => start('/extract')}>
-                Retry failed files
-              </Button>
-            )}
-          </header>
+        <Card title={`Failed files (${failedFiles.length})`}
+          actions={(failedFiles.length > 0 || waitingFiles > 0) && (
+            <Button variant="ghost" disabled={running || busy} onClick={() => start('/extract')}
+              title="Extract the CV files on disk that aren't done yet: failed ones and any copied in by hand">
+              {failedFiles.length ? 'Retry failed files' : `Extract ${fmt(waitingFiles)} waiting file${waitingFiles === 1 ? '' : 's'}`}
+            </Button>
+          )}>
           {failedFiles.length === 0 ? (
-            <p className="pl-panel-body muted">No failed files.</p>
+            <p className="muted">No failed files.</p>
           ) : (
-            <ul className="pl-failed">
-              {failedFiles.map((f) => (
-                <li key={`${f.file}-${f.at}`}>
-                  <span className="mono pl-failed-file">{f.file}</span>
-                  <span className="pl-failed-error small">{f.error}</span>
-                  <span className="muted small num">{formatDateTime(f.at)}</span>
-                </li>
-              ))}
-            </ul>
+            <div className="table-wrap pl-scroll">
+              <table className="table table-compact">
+                <tbody>
+                  {failedFiles.map((f) => (
+                    <tr key={`${f.file}-${f.at}`}>
+                      <td className="pl-wrap">
+                        <span className="mono">{f.file}</span>
+                        <div className="small pl-error">{f.error}</div>
+                      </td>
+                      <td className="muted small num">{formatDateTime(f.at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
-        </section>
+        </Card>
       </div>
+
+      {confirming && running && (
+        <ConfirmModal title="Cancel this run?" danger confirmLabel="Cancel run" busy={busy}
+          onConfirm={() => {
+            setConfirming(false)
+            control('cancel')
+          }}
+          onClose={() => setConfirming(false)}>
+          <p>The run stops after the current CV. Everything done so far is kept, and the next run carries on from there.</p>
+        </ConfirmModal>
+      )}
     </div>
   )
 }

@@ -90,3 +90,11 @@ export const TrashIcon = () => (
     <path d="M19 6l-1 14H6L5 6" />
   </svg>
 )
+
+export const BuildingIcon = () => (
+  <svg {...base}>
+    <rect x="4" y="3" width="16" height="18" rx="1.5" />
+    <path d="M9 7h1M14 7h1M9 11h1M14 11h1M9 15h1M14 15h1" />
+    <path d="M10 21v-3h4v3" />
+  </svg>
+)

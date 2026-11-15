@@ -96,6 +96,22 @@ def list_cv_keys() -> set[str]:
     return {item["Key"] for page in pages for item in page.get("Contents", [])}
 
 
+def cv_exists(key: str) -> bool:
+    """Whether the bucket still has this CV. Only a definite "not found" counts as missing."""
+    if not settings.aws_s3_bucket:
+        raise S3NotConfigured("AWS_S3_BUCKET is not configured")
+    from botocore.exceptions import ClientError
+    try:
+        _client().head_object(Bucket=settings.aws_s3_bucket, Key=key)
+        return True
+    except ClientError as e:
+        code = str(e.response.get("Error", {}).get("Code", ""))
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return False
+        log.warning("Could not check %s in S3: %s", key, e)
+        return True                  # e.g. no permission to check: let the link try
+
+
 def download_cv(key: str, target: Path) -> None:
     """Fetch one CV from the bucket (for re-extraction when it isn't on this computer)."""
     if not settings.aws_s3_bucket:

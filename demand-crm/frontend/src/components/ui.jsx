@@ -18,6 +18,20 @@ export function Field({ label, error, hint, children }) {
   )
 }
 
+// A small (i) next to a label. Its text shows on hover, on keyboard focus, and on tap (touch screens).
+export function InfoTip({ children, label = 'More information' }) {
+  const id = useId()
+  return (
+    <span className="infotip">
+      <button type="button" className="infotip-btn" aria-label={label} aria-describedby={id}
+        onClick={(e) => e.preventDefault()}>
+        i
+      </button>
+      <span role="tooltip" id={id} className="infotip-text">{children}</span>
+    </span>
+  )
+}
+
 export function Alert({ tone = 'error', title, children }) {
   if (!title && !children) return null
   return (

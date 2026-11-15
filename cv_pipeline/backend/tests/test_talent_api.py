@@ -355,6 +355,7 @@ def test_accepting_a_flag_closes_it_without_changes(client):
 
 def test_cv_links_for_every_version(client, monkeypatch):
     monkeypatch.setattr(settings, "aws_s3_bucket", "test-bucket")
+    monkeypatch.setattr("app.api.routes_talent.cv_exists", lambda key: True)
     _, good = person()
     _, failed = person("Amit Verma", s3="failed")
     body = client.get(f"/api/talent/cvs/{good}/url", params={"download": True}).json()
@@ -362,6 +363,17 @@ def test_cv_links_for_every_version(client, monkeypatch):
     assert "attachment" in body["url"] and body["expires_in"] == 300
     assert client.get(f"/api/talent/cvs/{failed}/url").status_code == 409
     assert client.get("/api/talent/cvs/999999/url").status_code == 404
+
+
+def test_a_cv_deleted_from_the_bucket_is_marked_missing(client, monkeypatch):
+    monkeypatch.setattr(settings, "aws_s3_bucket", "test-bucket")
+    monkeypatch.setattr("app.api.routes_talent.cv_exists", lambda key: False)
+    candidate, cv = person()
+    response = client.get(f"/api/talent/cvs/{cv}/url")
+    assert response.status_code == 409 and "missing from S3" in response.json()["title"]
+    with session_scope() as session:
+        assert session.get(CvDocument, cv).s3_status == "missing"
+    assert not client.get(f"/api/talent/candidates/{candidate}").json()["cvs"][0]["viewable"]
 
 
 # ---------- delete ----------
@@ -450,6 +462,7 @@ def test_delete_is_refused_while_a_run_is_active(admin, monkeypatch):
 def test_retrying_failed_s3_uploads(client, monkeypatch):
     uploaded = []
     monkeypatch.setattr(s3_store, "upload_cv_to_s3", lambda path: uploaded.append(path.name) or True)
+    monkeypatch.setattr(s3_store, "list_cv_keys", lambda: {"cvs/jobs@acct.com/May-2026/ccc.pdf"})
     _, failed = person(s3="failed", file_hash="aaa")
     person("Amit Verma", s3="missing", file_hash="bbb")             # no local file
     person("Suresh Patil", file_hash="ccc")                          # already fine
@@ -469,6 +482,22 @@ def test_retrying_failed_s3_uploads(client, monkeypatch):
         assert session.get(CvDocument, failed).s3_status == "success"
     state = json.loads((settings.state_folder / "processed_files.json").read_text(encoding="utf-8"))
     assert state["aaa"]["s3_status"] == "Success"
+
+
+def test_retry_puts_back_files_deleted_from_the_bucket(client, monkeypatch):
+    uploaded = []
+    monkeypatch.setattr(s3_store, "upload_cv_to_s3", lambda path: uploaded.append(path.name) or True)
+    monkeypatch.setattr(s3_store, "list_cv_keys", lambda: set())     # somebody emptied the bucket
+    _, gone = person(file_hash="aaa")
+    files_for("aaa")
+
+    task = client.post("/api/talent/s3/retry").json()
+    tasks.get(task["id"]).future.result(timeout=30)
+    done = client.get(f"/api/tasks/{task['id']}").json()
+
+    assert done["result"]["tried"] == 1 and done["result"]["uploaded"] == 1 and uploaded == ["aaa.pdf"]
+    with session_scope() as session:
+        assert session.get(CvDocument, gone).s3_status == "success"
 
 
 def test_status_includes_the_talent_counts(client):

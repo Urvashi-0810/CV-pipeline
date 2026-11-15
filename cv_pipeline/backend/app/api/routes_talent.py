@@ -14,7 +14,7 @@ from app.api.problems import ProblemError
 from app.api.tasks import LaneBusy, tasks
 from app.auth.deps import AdminUser, CurrentUser, DbSession
 from app.db.models import CvDocument
-from app.storage.s3_store import URL_EXPIRY_SECONDS, S3NotConfigured, presigned_cv_url
+from app.storage.s3_store import URL_EXPIRY_SECONDS, S3NotConfigured, cv_exists, presigned_cv_url
 from app.talent import service
 from app.talent.excel_export import request_refresh
 from app.talent.runs import recorded
@@ -160,6 +160,13 @@ def cv_url(cv_id: int, db: DbSession, download: bool = False):
         raise ProblemError(409, "cv-not-in-s3", "This CV isn't in S3",
                            "Its upload failed or the file is missing. Use Retry failed S3 uploads on the Pipeline screen.")
     try:
+        if not cv_exists(cv.s3_key):
+            # Deleted from the bucket outside this app. Mark it, so Retry uploads puts it back from this computer.
+            cv.s3_status = "missing"
+            db.commit()
+            raise ProblemError(409, "cv-not-in-s3", "This CV's file is missing from S3",
+                               "It was deleted from the bucket. Use Retry uploads on the Pipeline page "
+                               "to upload it again from this computer.")
         url = presigned_cv_url(cv.s3_key, download=download)
     except S3NotConfigured as e:
         raise ProblemError(503, "s3-not-configured", "S3 is not set up", str(e))

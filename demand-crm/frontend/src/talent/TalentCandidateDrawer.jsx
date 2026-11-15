@@ -309,7 +309,7 @@ export default function TalentCandidateDrawer({ candidateId, onClose, onChanged,
             {detail.cvs.length} CV{detail.cvs.length === 1 ? '' : 's'} · last received {formatDate(detail.received_at)}
           </span>
           {me?.admin_active && (
-            <Button variant="danger" size="sm" disabled={busy} onClick={() => setConfirm('delete')}>
+            <Button variant="danger" disabled={busy} onClick={() => setConfirm('delete')}>
               Delete candidate
             </Button>
           )}
