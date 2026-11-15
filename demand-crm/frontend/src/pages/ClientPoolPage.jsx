@@ -87,7 +87,7 @@ function ClientDrawer({ client, onClose, onSaved }) {
           {(id) => <input id={id} value={form.name} onChange={setField('name')} maxLength={200} autoFocus required />}
         </Field>
         <Field label="Client email address" error={errors.email}>
-          {(id) => <input id={id} type="email" value={form.email} onChange={setField('email')} maxLength={254} placeholder="Optional" />}
+          {(id) => <input id={id} type="email" value={form.email} onChange={setField('email')} maxLength={254} placeholder="" />}
         </Field>
 
         <div className="stack-sm">
