@@ -14,6 +14,10 @@ app/modules/admin/models.py
 app/modules/admin/router.py
 app/modules/admin/schemas.py
 app/modules/admin/service.py
+app/modules/ads/__init__.py
+app/modules/ads/convert.py
+app/modules/ads/export.py
+app/modules/ads/router.py
 app/modules/ai_admin/__init__.py
 app/modules/ai_admin/models.py
 app/modules/ai_admin/router.py
@@ -27,6 +31,10 @@ app/modules/chat/__init__.py
 app/modules/chat/models.py
 app/modules/chat/router.py
 app/modules/chat/service.py
+app/modules/dashboard/__init__.py
+app/modules/dashboard/export.py
+app/modules/dashboard/router.py
+app/modules/dashboard/service.py
 app/modules/demands/__init__.py
 app/modules/demands/export.py
 app/modules/demands/id_allocator.py
@@ -45,6 +53,7 @@ app/modules/letters/docx_builder.py
 app/modules/letters/docx_tools.py
 app/modules/letters/letter_model.py
 app/modules/letters/models.py
+app/modules/letters/positions.py
 app/modules/letters/router.py
 app/modules/letters/service.py
 app/modules/llm/__init__.py
@@ -75,10 +84,13 @@ scripts/generate_secret_key.py
 scripts/seed_demo.py
 tests/test_adapters.py
 tests/test_admin.py
+tests/test_ads.py
 tests/test_auth.py
 tests/test_chat_flow.py
+tests/test_dashboard.py
 tests/test_demands.py
 tests/test_extraction_and_docx.py
 tests/test_milestone4.py
 tests/test_name_change.py
 tests/test_passwords.py
+tests/test_positions.py

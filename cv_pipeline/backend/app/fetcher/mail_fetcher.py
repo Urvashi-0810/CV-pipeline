@@ -558,6 +558,19 @@ def _merge_pdf_files(pdf_paths: list[Path], output_path: Path) -> None:
         log.warning("PDF compression skipped for %s: %s", output_path, exc)
 
 
+def _merge_attachments_to_pdf(attachments, output_path: Path) -> None:
+    """Convert each attachment to PDF and merge them in order (used by manual uploads)."""
+    if not attachments:
+        raise ValueError("No attachments supplied for PDF creation")
+    with tempfile.TemporaryDirectory(prefix="cv_merge_") as temp_name:
+        work_dir = Path(temp_name)
+        converted = [
+            _convert_attachment_to_pdf(att, work_dir, index)
+            for index, att in enumerate(attachments, start=1)
+        ]
+        _merge_pdf_files(converted, output_path)
+
+
 def _convert_with_word(source_path: Path, output_pdf: Path) -> Path:
     """Convert a Word document to PDF using Microsoft Word COM."""
     import logging

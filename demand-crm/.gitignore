@@ -6,3 +6,8 @@ backend/.venv/
 .pytest_cache/
 frontend/node_modules/
 frontend/dist/
+
+# Local copies of .env and the non-Docker venv
+.env.*
+!.env.example
+backend/venv/

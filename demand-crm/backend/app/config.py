@@ -6,11 +6,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # demand-crm/.env is one level up from backend/ (the working dir when run without Docker);
+    # a backend/.env, if present, takes priority.
+    model_config = SettingsConfigDict(
+        env_file=("../.env", ".env"), env_file_encoding="utf-8", extra="ignore"
+    )
 
     # PostgreSQL connection, async driver. Example:
     # postgresql+asyncpg://crm:crm@localhost:5432/crm
-    database_url: str = "postgresql+asyncpg://crm:Nishi1509@localhost:5432/crm"
+    database_url: str = "postgresql+asyncpg://crm:crm@localhost:5432/crm"
 
     # Login session lifetime (absolute, from login).
     session_ttl_hours: int = 12
