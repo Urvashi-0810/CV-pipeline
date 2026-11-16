@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import re
 from pathlib import Path
+from typing import Optional
+from pydantic import BaseModel, Field
 
 from app.core.config import (
 
@@ -516,56 +518,57 @@ def _compress_pdf_lossless(pdf_path: Path) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
-def _merge_attachments_to_pdf(attachments, output_path: Path) -> None:
-    """Convert each attachment to PDF, merge in email order, then losslessly compress."""
+def _merge_pdf_files(pdf_paths: list[Path], output_path: Path) -> None:
+    """Merge already-converted PDFs in order, then losslessly compress."""
     from pypdf import PdfReader, PdfWriter
 
-    if not attachments:
-        raise ValueError("No attachments supplied for PDF creation")
+    if not pdf_paths:
+        raise ValueError("No PDFs supplied for merging")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="cv_merge_") as temp_name:
-        work_dir = Path(temp_name)
-        converted_paths = [
-            _convert_attachment_to_pdf(att, work_dir, index)
-            for index, att in enumerate(attachments, start=1)
-        ]
+    writer = PdfWriter()
+    page_count = 0
+    for pdf_path in pdf_paths:
+        reader = PdfReader(str(pdf_path), strict=False)
+        if reader.is_encrypted:
+            try:
+                if not reader.decrypt(""):
+                    raise ValueError("PDF requires a password")
+            except Exception as exc:
+                raise ValueError(f"Encrypted PDF cannot be merged: {pdf_path.name}") from exc
+        if len(reader.pages) == 0:
+            raise ValueError(f"PDF contains no pages: {pdf_path.name}")
+        writer.append(reader)
+        page_count += len(reader.pages)
 
-        writer = PdfWriter()
-        page_count = 0
-        for pdf_path in converted_paths:
-            reader = PdfReader(str(pdf_path), strict=False)
-            if reader.is_encrypted:
-                try:
-                    if not reader.decrypt(""):
-                        raise ValueError("PDF requires a password")
-                except Exception as exc:
-                    raise ValueError(f"Encrypted PDF cannot be merged: {pdf_path.name}") from exc
-            if len(reader.pages) == 0:
-                raise ValueError(f"PDF contains no pages: {pdf_path.name}")
-            writer.append(reader)
-            page_count += len(reader.pages)
+    if page_count == 0:
+        raise ValueError("No pages were available to merge")
 
-        if page_count == 0:
-            raise ValueError("No pages were available to merge")
+    temporary_output = output_path.with_name(output_path.stem + ".merging.tmp.pdf")
+    try:
+        with temporary_output.open("wb") as handle:
+            writer.write(handle)
+        temporary_output.replace(output_path)
+    finally:
+        temporary_output.unlink(missing_ok=True)
 
-        temporary_output = output_path.with_name(output_path.stem + ".merging.tmp.pdf")
-        try:
-            with temporary_output.open("wb") as handle:
-                writer.write(handle)
-            temporary_output.replace(output_path)
-        finally:
-            temporary_output.unlink(missing_ok=True)
-    # Compress only after every attachment has been converted/merged.
     try:
         _compress_pdf_lossless(output_path)
     except DependencyError as exc:
-        log.warning(
-            "PDF compression skipped for %s: %s. "
-            "Keeping the merged PDF if it is intact.",
-            output_path,
-            exc,
-        )
+        log.warning("PDF compression skipped for %s: %s", output_path, exc)
+
+
+def _merge_attachments_to_pdf(attachments, output_path: Path) -> None:
+    """Convert each attachment to PDF and merge them in order (used by manual uploads)."""
+    if not attachments:
+        raise ValueError("No attachments supplied for PDF creation")
+    with tempfile.TemporaryDirectory(prefix="cv_merge_") as temp_name:
+        work_dir = Path(temp_name)
+        converted = [
+            _convert_attachment_to_pdf(att, work_dir, index)
+            for index, att in enumerate(attachments, start=1)
+        ]
+        _merge_pdf_files(converted, output_path)
 
 
 def _convert_with_word(source_path: Path, output_pdf: Path) -> Path:
@@ -633,6 +636,92 @@ def _convert_with_word(source_path: Path, output_pdf: Path) -> Path:
             pythoncom.CoUninitialize()
         except Exception:
             pass
+
+class AttachmentInfo(BaseModel):
+    is_cv: bool = Field(
+        description="True ONLY if this document is a CV / resume / biodata of a job "
+        "candidate. False for passports, IDs, visas, photos, certificates, "
+        "degrees, experience letters, licences, cover letters, forms."
+    )
+    candidate_name: Optional[str] = Field(
+        default=None,
+        description="Full name of the person this document belongs to, exactly as "
+        "written on the document. Null if not visible.",
+    )
+
+
+CLASSIFY_PROMPT = (
+    "You are looking at ONE document attached to a job-application email. "
+    "Decide whether it is the candidate's CV/resume, and read the name of the "
+    "person it belongs to."
+)
+
+
+def _first_pages(pdf_path: Path, work_dir: Path, index: int, pages: int = 2) -> Path:
+    """Return a PDF with only the first pages (cheaper to send to the LLM)."""
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(str(pdf_path), strict=False)
+    if len(reader.pages) <= pages:
+        return pdf_path
+    writer = PdfWriter()
+    for page in reader.pages[:pages]:
+        writer.add_page(page)
+    preview = work_dir / f"preview_{index:03d}.pdf"
+    with preview.open("wb") as handle:
+        writer.write(handle)
+    return preview
+
+
+def _classify_pdf(pdf_path: Path, work_dir: Path, index: int) -> Optional[AttachmentInfo]:
+    try:
+        preview = _first_pages(pdf_path, work_dir, index)
+        llm = get_llm(settings.llm_provider)
+        return llm.extract(AttachmentInfo, CLASSIFY_PROMPT, file=preview, max_retries=1)
+    except Exception:
+        log.exception("Could not classify attachment %s", pdf_path.name)
+        return None
+
+
+def _name_tokens(name: Optional[str]) -> set[str]:
+    return set(re.findall(r"[a-z]+", (name or "").lower()))
+
+
+def _same_person(a: Optional[str], b: Optional[str]) -> bool:
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if not ta or not tb:
+        return False
+    # Token sets handle "SMITH JOHN" vs "John Smith" (passport vs CV order).
+    return len(ta & tb) >= min(2, len(ta), len(tb))
+
+
+def _group_by_cv(items: list[tuple]) -> list[list[tuple]]:
+    """
+    items: [(att, pdf_path, info), ...] in email order.
+    One group per CV. Supporting docs go to the CV with the same person name,
+    otherwise to the nearest preceding CV (or the first CV if none precedes).
+    """
+    cv_positions = [i for i, (_, _, info) in enumerate(items) if info.is_cv]
+    if len(cv_positions) <= 1:
+        return [items]
+
+    groups = {pos: [items[pos]] for pos in cv_positions}
+    for i, item in enumerate(items):
+        if i in groups:
+            continue
+        info = item[2]
+        target = next(
+            (pos for pos in cv_positions if _same_person(info.candidate_name, items[pos][2].candidate_name)),
+            None,
+        )
+        if target is None:
+            preceding = [pos for pos in cv_positions if pos < i]
+            target = preceding[-1] if preceding else cv_positions[0]
+        groups[target].append(item)
+
+    # Keep email order inside each group
+    order = {id(item): i for i, item in enumerate(items)}
+    return [sorted(groups[pos], key=lambda it: order[id(it)]) for pos in cv_positions]
 
 class MailFetcher:
     def __init__(self):
@@ -988,57 +1077,100 @@ class MailFetcher:
         hashes = self.manifest.get("by_hash", {})
         subject = msg.subject or f"Email_UID_{msg.uid}"
         base_name = safe_filename(_safe_subject(subject, 100))
-        output_path = _unique_path(month_path, f"{base_name}.pdf")
 
         try:
-            # One attachment is converted too, so the downstream extractor always receives PDF.
-            _merge_attachments_to_pdf(cv_attachments, output_path)
-            digest = file_sha256(output_path.read_bytes())
-            manifest_key = f"PDF:{digest}"
+            with tempfile.TemporaryDirectory(prefix="cv_email_") as temp_name:
+                work_dir = Path(temp_name)
 
-            if manifest_key in hashes:
-                existing_file = hashes[manifest_key].get("file", "")
-                existing_path = Path(existing_file) if existing_file else None
-                if existing_path and not existing_path.is_absolute():
-                    existing_path = settings.cv_folder / existing_path
-                if existing_path and existing_path.exists():
-                    output_path.unlink(missing_ok=True)
-                    result.duplicates_skipped += 1
-                    log.info("Duplicate PDF skipped: %s (same content as %s)", output_path.name, existing_path)
+                # 1) Convert every attachment to PDF once.
+                converted = []  # [(att, pdf_path)]
+                for index, att in enumerate(cv_attachments, start=1):
+                    try:
+                        converted.append((att, _convert_attachment_to_pdf(att, work_dir, index)))
+                    except Exception:
+                        log.exception("Skipping attachment %r of email UID %s (conversion failed)",
+                                      getattr(att, "filename", None), msg.uid)
+                if not converted:
                     return
-                log.warning("Removing stale PDF manifest entry: %s", existing_file)
-                hashes.pop(manifest_key, None)
 
-            try:
-                relative_path = str(output_path.relative_to(settings.cv_folder))
-            except ValueError:
-                relative_path = str(output_path)
+                # 2) Classify only when 2+ non-image documents exist.
+                non_image = [
+                    c for c in converted
+                    if _get_attachment_extension(c[0]) not in IMAGE_EXTENSIONS
+                ]
+                items = None
+                if len(non_image) >= 2:
+                    infos = []
+                    for index, (att, pdf_path) in enumerate(converted, start=1):
+                        if _get_attachment_extension(att) in IMAGE_EXTENSIONS:
+                            infos.append(AttachmentInfo(is_cv=False))
+                        else:
+                            infos.append(_classify_pdf(pdf_path, work_dir, index))
+                    if all(info is not None for info in infos):
+                        items = [(a, p, i) for (a, p), i in zip(converted, infos)]
+                        groups = _group_by_cv(items)
+                    else:
+                        log.warning("Classification failed for email UID %s; merging everything", msg.uid)
+                        groups = None
+                else:
+                    groups = None
 
-            hashes[manifest_key] = {
-                "file": relative_path,
-                "original_names": [a.filename or "attachment" for a in cv_attachments],
-                "from": msg.from_ or "",
-                "from_name": msg.from_values.name if msg.from_values else "",
-                "subject": msg.subject or "",
-                "mail_date": msg.date.isoformat() if msg.date else None,
-                "uid": int(msg.uid),
-                "folder": settings.imap_folder,
-                "downloaded_at": datetime.now().isoformat(timespec="seconds"),
-                "attachment_count": len(cv_attachments),
-            }
-            result.attachments_saved += 1
-            result.saved_files.append(str(output_path))
-            log.info(
-                "Created %s from %d attachment(s): %s",
-                "merged PDF" if len(cv_attachments) > 1 else "PDF",
-                len(cv_attachments), output_path,
-            )
-        except Exception as exc:
-            output_path.unlink(missing_ok=True)
-            log.exception(
-                "Failed converting/merging attachments for email UID %s. "
-                "No combined PDF was saved: %s", msg.uid, exc,
-            )
+                if groups is None:
+                    groups = [[(a, p, None) for a, p in converted]]
+
+                if len(groups) > 1:
+                    log.info("Email UID %s has %d CVs; creating one PDF per CV", msg.uid, len(groups))
+
+                # 3) One merged PDF per group.
+                for group_no, group in enumerate(groups, start=1):
+                    file_stem = base_name if len(groups) == 1 else f"{base_name}_{group_no}"
+                    output_path = _unique_path(month_path, f"{file_stem}.pdf")
+                    try:
+                        _merge_pdf_files([p for _, p, _ in group], output_path)
+                        digest = file_sha256(output_path.read_bytes())
+                        manifest_key = f"PDF:{digest}"
+
+                        if manifest_key in hashes:
+                            existing_file = hashes[manifest_key].get("file", "")
+                            existing_path = Path(existing_file) if existing_file else None
+                            if existing_path and not existing_path.is_absolute():
+                                existing_path = settings.cv_folder / existing_path
+                            if existing_path and existing_path.exists():
+                                output_path.unlink(missing_ok=True)
+                                result.duplicates_skipped += 1
+                                log.info("Duplicate PDF skipped: %s (same as %s)",
+                                         output_path.name, existing_path)
+                                continue
+                            log.warning("Removing stale PDF manifest entry: %s", existing_file)
+                            hashes.pop(manifest_key, None)
+
+                        try:
+                            relative_path = str(output_path.relative_to(settings.cv_folder))
+                        except ValueError:
+                            relative_path = str(output_path)
+
+                        hashes[manifest_key] = {
+                            "file": relative_path,
+                            "original_names": [a.filename or "attachment" for a, _, _ in group],
+                            "from": msg.from_ or "",
+                            "from_name": msg.from_values.name if msg.from_values else "",
+                            "subject": msg.subject or "",
+                            "mail_date": msg.date.isoformat() if msg.date else None,
+                            "uid": int(msg.uid),
+                            "folder": settings.imap_folder,
+                            "downloaded_at": datetime.now().isoformat(timespec="seconds"),
+                            "attachment_count": len(group),
+                            "cv_group": group_no,
+                            "cv_groups_in_email": len(groups),
+                        }
+                        result.attachments_saved += 1
+                        result.saved_files.append(str(output_path))
+                        log.info("Created %s from %d attachment(s): %s",
+                                 "merged PDF" if len(group) > 1 else "PDF",
+                                 len(group), output_path)
+                    except Exception:
+                        output_path.unlink(missing_ok=True)
+                        log.exception("Failed merging group %d of email UID %s", group_no, msg.uid)
         finally:
             self.manifest.set("by_hash", hashes)
 
