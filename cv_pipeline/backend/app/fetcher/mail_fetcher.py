@@ -649,7 +649,6 @@ def _convert_with_word(source_path: Path, output_pdf: Path) -> Path:
         except Exception:
             pass
 
-<<<<<<< HEAD
 class AttachmentInfo(BaseModel):
     is_cv: bool = Field(
         description="True ONLY if this document is a CV / resume / biodata of a job "
@@ -735,7 +734,6 @@ def _group_by_cv(items: list[tuple]) -> list[list[tuple]]:
     # Keep email order inside each group
     order = {id(item): i for i, item in enumerate(items)}
     return [sorted(groups[pos], key=lambda it: order[id(it)]) for pos in cv_positions]
-=======
 @dataclass
 class MailSource:
     """Which mailbox and folder a fetch reads, and which mail.
@@ -760,8 +758,6 @@ class MailSource:
         """The single mailbox in .env, as the command line uses it."""
         return cls(settings.imap_host, settings.imap_port, settings.imap_user, settings.imap_password,
                    settings.imap_folder, settings.fetch_since_date, settings.fetch_until_date)
-
->>>>>>> crm
 
 class MailFetcher:
     def __init__(self, source: Optional[MailSource] = None):
