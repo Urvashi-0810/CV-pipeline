@@ -766,12 +766,9 @@ class MailFetcher:
         self.state = JsonState(settings.state_folder/ "mail_state.json")
         self.manifest = JsonState(settings.state_folder/ "attachments_manifest.json")
         
-        # Unique key for mailbox + folder
-        self.key = (
-            f"{settings.imap_user}|"
-            f"{settings.imap_host}|"
-            f"{settings.imap_folder}"
-        )
+        # Unique key for mailbox + folder: each has its own "last fetch" marker.
+        self.key = mailbox_state_key(self.source.user, self.source.host, self.source.folder)
+
 
     # ========================================================
     # IMAP connection
@@ -1235,6 +1232,8 @@ def fetch_cvs(
     """
     return MailFetcher().run(reset=reset)
 
+def mailbox_state_key(user: str, host: str, folder: str) -> str:
+    return f"{user}|{host}|{folder}"
 
 def list_cv_files(folder: Path) -> list[Path]:
     return sorted(
