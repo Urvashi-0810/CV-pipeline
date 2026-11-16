@@ -62,7 +62,8 @@ def test_extract_to_excel_and_skip_on_rerun(parser_mode):
     df = load_candidates()
     methods = dict(zip(df["CV File"], df["Extraction Method"]))
     if parser_mode == "llm":
-        assert methods == {"rahul.pdf": "llm-file", "rahul2.docx": "docx-text"}
+        assert methods == {"Senior_Software_Engineer_P1234567_Rahul_Sharma.pdf": "llm-file",
+                           "Senior_Software_Engineer_P1234567_Rahul_Sharma_1.pdf": "docx-text"}
         pdf_call = [kw for _, kw in mock_llm.SENT if "document" in str(kw["messages"])]
         assert pdf_call, "the PDF itself should be sent to the LLM"
     else:
@@ -98,3 +99,33 @@ def test_bad_file_does_not_stop_batch():
     (settings.cv_folder / "broken.docx").write_bytes(b"this is not a docx")
     r = cv_extractor.run_extraction()
     assert r.extracted == 1 and r.failed == 1 and "broken.docx" in r.errors
+
+
+def _encrypted_copy(source, target, user_password):
+    from pypdf import PdfReader, PdfWriter
+    writer = PdfWriter()
+    for page in PdfReader(str(source)).pages:
+        writer.add_page(page)
+    writer.encrypt(user_password=user_password, owner_password="owner-secret")
+    with open(target, "wb") as fh:
+        writer.write(fh)
+
+
+def test_password_protected_pdf_is_skipped_not_failed(tmp_path):
+    """Gemini rejects these with 400 INVALID_ARGUMENT. They are set aside once, never retried as failures."""
+    make_pdf(settings.cv_folder / "good.pdf")
+    make_pdf(tmp_path / "plain.pdf")
+    _encrypted_copy(tmp_path / "plain.pdf", settings.cv_folder / "contract-notes.pdf", user_password="PAN1234")
+
+    r = cv_extractor.run_extraction()
+    assert r.extracted == 1 and r.failed == 0 and r.skipped_protected == 1, r.errors
+
+    r = cv_extractor.run_extraction()                                 # not tried again
+    assert r.extracted == 0 and r.failed == 0 and r.skipped_protected == 0 and r.skipped_already_done == 2
+
+
+def test_pdf_encrypted_without_a_password_is_unlocked_and_extracted(tmp_path):
+    make_pdf(tmp_path / "plain.pdf")
+    _encrypted_copy(tmp_path / "plain.pdf", settings.cv_folder / "locked-for-editing.pdf", user_password="")
+    r = cv_extractor.run_extraction()
+    assert r.extracted == 1 and r.failed == 0 and r.skipped_protected == 0, r.errors

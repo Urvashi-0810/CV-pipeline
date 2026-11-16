@@ -1,6 +1,7 @@
 """Request bodies for the API (FastAPI validates them and shows them in /docs)."""
 from __future__ import annotations
 
+from datetime import date
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -10,6 +11,12 @@ Provider = Optional[Literal["claude", "gemini"]]
 
 class FetchRequest(BaseModel):
     reset: bool = False
+    # Which mailbox and folder to read. Without a mailbox, the one in .env is used.
+    mailbox_id: Optional[int] = None
+    folder: Optional[str] = None
+    # Both dates (inclusive) = a date-range run; neither = mail new since the last fetch.
+    since: Optional[date] = None
+    until: Optional[date] = None
 
 
 class ExtractRequest(BaseModel):
@@ -18,8 +25,8 @@ class ExtractRequest(BaseModel):
     limit: Optional[int] = Field(None, ge=1)
 
 
-class RunRequest(ExtractRequest):
-    reset: bool = False
+class RunRequest(ExtractRequest, FetchRequest):
+    pass
 
 
 class JdUpdate(BaseModel):

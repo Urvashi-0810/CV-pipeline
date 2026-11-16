@@ -18,6 +18,20 @@ export function Field({ label, error, hint, children }) {
   )
 }
 
+// A small (i) next to a label. Its text shows on hover, on keyboard focus, and on tap (touch screens).
+export function InfoTip({ children, label = 'More information' }) {
+  const id = useId()
+  return (
+    <span className="infotip">
+      <button type="button" className="infotip-btn" aria-label={label} aria-describedby={id}
+        onClick={(e) => e.preventDefault()}>
+        i
+      </button>
+      <span role="tooltip" id={id} className="infotip-text">{children}</span>
+    </span>
+  )
+}
+
 export function Alert({ tone = 'error', title, children }) {
   if (!title && !children) return null
   return (
@@ -95,7 +109,7 @@ export function formatDate(value) {
   return value ? dayFormat.format(new Date(value)) : '—'
 }
 
-export function Drawer({ title, subtitle, onClose, children, footer }) {
+export function Drawer({ title, subtitle, onClose, children, footer, className = '' }) {
   useEffect(() => {
     const onKey = (e) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
@@ -103,7 +117,7 @@ export function Drawer({ title, subtitle, onClose, children, footer }) {
   }, [onClose])
   return (
     <div className="drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <aside className="drawer" role="dialog" aria-modal="true" aria-label={title}>
+      <aside className={`drawer ${className}`.trim()} role="dialog" aria-modal="true" aria-label={title}>
         <header className="drawer-header">
           <div>
             <h2>{title}</h2>

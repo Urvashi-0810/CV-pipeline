@@ -2,7 +2,7 @@ from __future__ import annotations
 import re
 from pypdf.errors import DependencyError
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from imap_tools import AND, MailBox
 from imap_tools import U as UidRange
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 from pydantic import BaseModel, Field
 
+from app.core.control import RunCancelled, checkpoint, was_paused
 from app.core.config import (
 
     CV_EXTENSIONS,
@@ -52,6 +53,17 @@ class FetchResult:
     duplicates_skipped: int = 0
     last_uid: int = 0
     saved_files: list[str] = field(default_factory=list)
+    mails_to_scan: int = 0
+    # Fetch extracts each batch as it goes; these add up those extractions.
+    cvs_extracted: int = 0
+    cvs_failed: int = 0
+    cvs_skipped_protected: int = 0
+    cvs_skipped_already_done: int = 0
+    extraction_errors: dict[str, str] = field(default_factory=dict)
+    # Set when a batch failed and the fetch stopped there. The next fetch carries on from that point.
+    stopped_early: Optional[str] = None
+    # Stopped by Cancel. Progress is saved up to the last full batch; the next fetch carries on.
+    cancelled: bool = False
 
     def as_dict(self) -> dict:
         return self.__dict__.copy()
@@ -637,6 +649,7 @@ def _convert_with_word(source_path: Path, output_pdf: Path) -> Path:
         except Exception:
             pass
 
+<<<<<<< HEAD
 class AttachmentInfo(BaseModel):
     is_cv: bool = Field(
         description="True ONLY if this document is a CV / resume / biodata of a job "
@@ -722,10 +735,38 @@ def _group_by_cv(items: list[tuple]) -> list[list[tuple]]:
     # Keep email order inside each group
     order = {id(item): i for i, item in enumerate(items)}
     return [sorted(groups[pos], key=lambda it: order[id(it)]) for pos in cv_positions]
+=======
+@dataclass
+class MailSource:
+    """Which mailbox and folder a fetch reads, and which mail.
+
+    since and until (YYYY-MM-DD, both inclusive) make it a date-range run: it reads mail in that
+    period and doesn't move the "last fetch" marker. Without them it reads mail new since the last fetch.
+    """
+    host: str
+    port: int
+    user: str
+    password: str
+    folder: str = "INBOX"
+    since: str = ""
+    until: str = ""
+
+    @property
+    def date_range(self) -> bool:
+        return bool(self.since and self.until)
+
+    @classmethod
+    def from_settings(cls) -> "MailSource":
+        """The single mailbox in .env, as the command line uses it."""
+        return cls(settings.imap_host, settings.imap_port, settings.imap_user, settings.imap_password,
+                   settings.imap_folder, settings.fetch_since_date, settings.fetch_until_date)
+
+>>>>>>> crm
 
 class MailFetcher:
-    def __init__(self):
+    def __init__(self, source: Optional[MailSource] = None):
         settings.ensure_dirs()
+        self.source = source or MailSource.from_settings()
         self.state = JsonState(settings.state_folder/ "mail_state.json")
         self.manifest = JsonState(settings.state_folder/ "attachments_manifest.json")
         

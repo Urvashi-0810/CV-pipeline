@@ -1,12 +1,10 @@
-# CV Recruitment Pipeline
+# CV Pipeline
 
-| Part | Status |
-|---|---|
-| `backend/` – Step 1: fetch CVs from mail (Zoho/Gmail) | ✅ built |
-| `backend/` – Step 2: extract CV data via LLM → Excel | ✅ built |
-| `backend/` – Step 3: shortlist from Excel (pandas rules) | ✅ built |
-| `backend/` – Step 4: JD fit via LLM | ✅ built |
-| `backend/` – FastAPI layer | ✅ built |
-| `frontend/` – React UI | ⏳ next |
-This is it
-Start here: **[backend/README.md](backend/README.md)**
+Collects CVs from the company mailbox, reads them with AI, and keeps every candidate in a searchable
+Talent Pool.
+
+- **Backend, setup and run instructions:** [backend/README.md](backend/README.md)
+- **Screens:** the Talent Pool screens are part of the CRM website in
+  [../demand-crm/frontend](../demand-crm/frontend) — see
+  [backend/README.md → Part B](backend/README.md#part-b--run-the-backend-with-the-frontend-talent-pool-screens).
+- **Whole project:** [../README.md](../README.md)

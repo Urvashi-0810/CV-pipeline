@@ -44,6 +44,11 @@ class JsonState:
         os.replace(tmp, self.path)
 
 
+def manifest_entry(by_hash: dict, digest: str) -> dict:
+    """Find a CV's manifest entry. The register holds both `PDF:<hash>` and bare `<hash>` labels."""
+    return by_hash.get(f"PDF:{digest}") or by_hash.get(digest) or {}
+
+
 def file_sha256(path_or_bytes: Path | bytes) -> str:
     """Content hash -> the same CV sent twice (even with another name) is detected."""
     h = hashlib.sha256()

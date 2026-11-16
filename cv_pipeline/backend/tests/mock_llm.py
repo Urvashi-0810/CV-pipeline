@@ -23,7 +23,14 @@ CANDIDATE = {"full_name": "Rahul Sharma", "email": "rahul.sharma@example.com", "
              "education": [{"degree": "B.E. Computer", "institution": "Univ of Pune", "year": "2016", "score": "72%"}],
              "current_job_title": "Senior Software Engineer", "current_company": "Infosys",
              "date_of_birth": "1994-03-14", "age": None, "certifications": ["AWS SA"],
-             "languages": ["English", "Hindi"], "location": "Pune", "summary": "Backend dev."}
+             "languages": ["English", "Hindi"], "location": "Pune", "summary": "Backend dev.",
+             "gender": "Male", "nationality": "Indian", "passport_expiry": "2031-05-20", "passport_type": "ECNR",
+             "work_history": [
+                 {"employer": "Infosys", "position": "Senior Software Engineer", "country": "India",
+                  "sector": "other", "other_sector": "IT services", "start_date": "2020-01", "end_date": "present"},
+                 {"employer": "ADNOC", "position": "Engineer", "country": "United Arab Emirates",
+                  "sector": "oil_gas", "start_date": "2016-03", "end_date": "2019-12"},
+             ]}
 
 REQUIREMENTS = {
     "job_title": "Python Developer", "seniority": "Mid", "min_experience_years": 3, "max_experience_years": None,

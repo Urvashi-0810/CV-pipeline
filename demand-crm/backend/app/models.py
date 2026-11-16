@@ -7,6 +7,7 @@ from app.modules.demands.models import DemandLetter, DemandTrade, IdempotencyKey
 from app.modules.chat.models import ChatMessage  # noqa: F401
 from app.modules.jobs.models import GenerationJob  # noqa: F401
 from app.modules.letters.models import LetterVersion  # noqa: F401
+from app.modules.clients.models import Client, ClientContact  # noqa: F401
 from app.modules.ai_admin.models import (  # noqa: F401
     Letterhead, LlmCall, LlmProviderConfig, PromptVersion, ReferenceLetter,
 )

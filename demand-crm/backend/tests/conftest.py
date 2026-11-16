@@ -88,7 +88,7 @@ async def clean_tables(app, storage_root):
     async with get_sessionmaker()() as db:
         await db.execute(
             text(
-                "truncate reference_letters, llm_calls, letter_versions, letterheads, llm_provider_configs, "
+                "truncate client_contacts, clients, reference_letters, llm_calls, letter_versions, letterheads, llm_provider_configs, "
                 "generation_jobs, chat_messages, idempotency_keys, files, demand_trades, "
                 "demand_letters, sessions, name_change_requests, app_settings, users "
                 "restart identity cascade"

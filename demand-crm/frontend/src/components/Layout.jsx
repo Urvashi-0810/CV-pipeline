@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
-import { FileTextIcon, GridIcon, MegaphoneIcon, ShieldIcon, UserIcon } from './icons'
+import { BuildingIcon, ColumnsIcon, FileTextIcon, GridIcon, MegaphoneIcon, ShieldIcon, UserIcon, UsersIcon } from './icons'
 
 function initials(name) {
   return name
@@ -24,7 +24,7 @@ export default function Layout() {
           </span>
         </div>
         <nav aria-label="Main">
-          <p className="nav-section">Core modules</p>
+          <p className="nav-section">CRM</p>
           <NavLink to="/dashboard" className="nav-link">
             <GridIcon /> Dashboard
           </NavLink>
@@ -34,10 +34,28 @@ export default function Layout() {
           <NavLink to="/advertisements" className="nav-link">
             <MegaphoneIcon /> Create Advertisement
           </NavLink>
+          <NavLink to="/clients" className="nav-link">
+            <BuildingIcon /> Client Pool
+          </NavLink>
           <NavLink to="/profile" className="nav-link">
             <UserIcon /> My Profile
           </NavLink>
           <NavLink to="/admin" className="nav-link">
+            <ShieldIcon /> Admin
+          </NavLink>
+
+          {/* The Talent Pool has its own login, profile and admin, separate from the CRM's. */}
+          <p className="nav-section nav-section-gap">Talent Pool</p>
+          <NavLink to="/talent" end className="nav-link">
+            <UsersIcon /> Candidate List
+          </NavLink>
+          <NavLink to="/talent/pipeline" className="nav-link">
+            <ColumnsIcon /> Pipeline
+          </NavLink>
+          <NavLink to="/talent/profile" className="nav-link">
+            <UserIcon /> My Profile
+          </NavLink>
+          <NavLink to="/talent/admin" className="nav-link">
             <ShieldIcon /> Admin
           </NavLink>
         </nav>

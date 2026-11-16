@@ -23,6 +23,7 @@ from app.core.models import Candidate
 log = get_logger("excel")
 
 SHEET = "Candidates"
+ALL_FIELDS_SHEET = "All fields"
 KEY = "File Hash"
 
 # Column order in the Excel file (and width in characters)
@@ -51,6 +52,10 @@ def _fmt_education(c: Candidate) -> str:
     return "; ".join(parts)
 
 
+def format_mail_date(mail_date: str | None) -> str | None:
+    return (mail_date or "")[:16].replace("T", " ") or None
+
+
 def candidate_to_row(c: Candidate, *, file_name: str, file_hash: str, mail_meta: dict,
                      method: str, provider: str) -> dict:
     return {
@@ -72,7 +77,7 @@ def candidate_to_row(c: Candidate, *, file_name: str, file_hash: str, mail_meta:
         "CV File": file_name,
         "Received From": mail_meta.get("from"),
         "Mail Subject": mail_meta.get("subject"),
-        "Mail Date": (mail_meta.get("mail_date") or "")[:16].replace("T", " ") or None,
+        "Mail Date": format_mail_date(mail_meta.get("mail_date")),
         "Extraction Method": method,
         "LLM": provider,
         "Extracted At": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -85,8 +90,10 @@ def load_candidates(path: Path | None = None) -> pd.DataFrame:
     path = path or settings.output_excel
     if not path.exists():
         return pd.DataFrame(columns=list(COLUMNS))
-    df = pd.read_excel(path, sheet_name=SHEET, dtype={KEY: str, "Phone": str})
-    return df
+    # Rebuilt from Postgres, the file has the client's layout on "Candidates" and these columns on "All fields".
+    with pd.ExcelFile(path) as workbook:
+        sheet = ALL_FIELDS_SHEET if ALL_FIELDS_SHEET in workbook.sheet_names else SHEET
+        return pd.read_excel(workbook, sheet_name=sheet, dtype={KEY: str, "Phone": str})
 
 
 def upsert_rows(rows: list[dict], path: Path | None = None) -> int:

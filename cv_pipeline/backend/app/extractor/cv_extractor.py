@@ -4,18 +4,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 from app.core.config import CV_EXTENSIONS, settings
+from app.core.control import RunCancelled, checkpoint
 from app.core.logger import get_logger
 from app.core.models import Candidate
-from app.core.state import JsonState, file_sha256
+from app.core.state import JsonState, file_sha256, manifest_entry
 from app.extractor import converter
 from app.extractor.prompts import cv_extraction_system_prompt
 from app.llm.client import get_llm
 from app.storage.excel_store import candidate_to_row, load_candidates, upsert_rows
+from app.storage.s3_store import upload_cv_to_s3
 import re
+import tempfile
 import time
 import traceback
-import os
-import boto3
 
 log = get_logger("extractor")
 
@@ -44,11 +45,65 @@ class ExtractResult:
     extracted: int = 0
     skipped_already_done: int = 0
     failed: int = 0
+    skipped_protected: int = 0       # password-protected PDFs: nobody can read them, so they aren't retried
     total_rows_in_excel: int = 0
     errors: dict[str, str] = field(default_factory=dict)
+    # Per file hash: which candidate the CV joined and what it changed (talent database only)
+    placements: dict[str, dict] = field(default_factory=dict)
+    excel_note: Optional[str] = None
+    cancelled: bool = False          # stopped by Cancel; files not reached are done by the next Extract
 
     def as_dict(self) -> dict:
         return self.__dict__.copy()
+
+
+def _store_in_talent_db(candidate: Candidate, digest: str, final_path: Path, mail_meta: dict, method: str,
+                        provider_name: str, s3_uploaded: bool, education: Optional[str]) -> dict:
+    """Write one extracted CV to Postgres and run the matching rules. Raises on failure."""
+    from dataclasses import asdict
+    from datetime import timezone
+
+    from app.db.session import session_scope
+    from app.storage.s3_store import key_for, relative_cv_path
+    from app.talent.ingest import extracted_from_model, place_cv
+
+    relative_path = relative_cv_path(final_path)
+    manual = mail_meta.get("source") == "manual"
+    try:
+        mail_date = datetime.fromisoformat(mail_meta["mail_date"]) if mail_meta.get("mail_date") else None
+    except ValueError:
+        mail_date = None
+    now = datetime.now(timezone.utc)
+    parts = relative_path.split("/") if relative_path else []
+    document = {
+        "file_hash": digest, "file_name": final_path.name, "local_rel_path": relative_path,
+        "s3_key": key_for(relative_path) if relative_path else None,
+        "s3_status": "success" if s3_uploaded else "failed",
+        "source_type": "manual" if manual else "mail",
+        "mail_account": parts[0] if len(parts) > 1 and not manual else None,
+        "mail_from": mail_meta.get("from") or None, "mail_from_name": mail_meta.get("from_name") or None,
+        "mail_subject": mail_meta.get("subject") or None, "mail_date": mail_date,
+        # Newer means a later mail date; a manual upload counts from when it was uploaded.
+        "received_at": mail_date or now,
+        "extraction_method": method, "llm": provider_name, "extracted_at": now,
+    }
+    with session_scope() as session:
+        placement = place_cv(session, document, extracted_from_model(candidate, education))
+    return asdict(placement)
+
+
+def _refresh_excel(res: ExtractResult, rows: list[dict]) -> None:
+    """Rebuild the Excel from Postgres once per run. Never fails the run: the CVs are already stored."""
+    from app.talent.excel_export import ExcelNotMigrated, regenerate_excel
+    try:
+        regenerate_excel()
+    except ExcelNotMigrated as e:
+        # Before the historical backfill the Excel can't be rebuilt without losing rows: add to it instead.
+        upsert_rows(rows)
+        res.excel_note = f"Rows added to the existing Excel. {e}"
+    except Exception as e:  # noqa: BLE001 - e.g. the file is open in Excel
+        res.excel_note = f"The Excel was not updated: {e}"
+        log.error("Excel not updated: %s", e)
 
 
 def text_cache_dir() -> Path:
@@ -65,20 +120,60 @@ def list_cv_files(folder: Path) -> list[Path]:
     )
 
 
+PROTECTED_MESSAGE = "Password-protected PDF: it can't be opened without its password, so it was skipped."
+
+
+class PasswordProtected(RuntimeError):
+    """The PDF needs a password to open. The AI services reject such files (Gemini: 400 INVALID_ARGUMENT)."""
+
+
+def _unlocked_copy(path: Path, workdir: Path) -> Optional[Path]:
+    """An encrypted PDF that opens without a password, rewritten without the encryption.
+
+    Returns None for files that aren't encrypted PDFs (they are sent as they are).
+    Raises PasswordProtected when a password is really needed.
+    """
+    if path.suffix.lower() != ".pdf":
+        return None
+    from pypdf import PdfReader, PdfWriter
+    try:
+        reader = PdfReader(str(path))
+        if not reader.is_encrypted:
+            return None
+        if not reader.decrypt(""):
+            raise PasswordProtected(PROTECTED_MESSAGE)
+        writer = PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
+    except PasswordProtected:
+        raise
+    except Exception:  # noqa: BLE001 - unreadable or damaged: let the AI try the original
+        log.debug("Could not check %s for encryption", path.name, exc_info=True)
+        return None
+    target = workdir / path.name
+    with target.open("wb") as fh:
+        writer.write(fh)
+    log.info("Unlocked %s (encrypted, but opens without a password)", path.name)
+    return target
+
+
 def extract_one(path: Path, provider: Optional[str] = None) -> tuple[Candidate, str, str]:
     """Extract one CV. Returns (candidate, method, text_sent). Raises on failure."""
     llm = get_llm(provider)
     system = cv_extraction_system_prompt()
 
-    # 1) decide what the LLM gets: the file itself (PDF/image) or text (DOCX / Docling)
-    text, file, method = converter.prepare_for_llm(path)
+    with tempfile.TemporaryDirectory() as workdir:
+        source = _unlocked_copy(path, Path(workdir)) or path
 
-    # 2) the LLM parses the resume and fills the Candidate schema
-    candidate = llm.extract(
-        Candidate, system,
-        text=f"CV CONTENT:\n\n{text[:MAX_TEXT_CHARS]}" if text.strip() else None,
-        file=file,
-    )
+        # 1) decide what the LLM gets: the file itself (PDF/image) or text (DOCX / Docling)
+        text, file, method = converter.prepare_for_llm(source)
+
+        # 2) the LLM parses the resume and fills the Candidate schema
+        candidate = llm.extract(
+            Candidate, system,
+            text=f"CV CONTENT:\n\n{text[:MAX_TEXT_CHARS]}" if text.strip() else None,
+            file=file,
+        )
     candidate.fill_age_from_dob()
     return candidate, method, text
 
@@ -100,7 +195,8 @@ def run_extraction(
     """
     settings.ensure_dirs()
     processed = JsonState(settings.state_folder / "processed_files.json")
-    manifest = JsonState(settings.state_folder / "attachments_manifest.json").get("by_hash", {})
+    manifest_state = JsonState(settings.state_folder / "attachments_manifest.json")
+    manifest = manifest_state.get("by_hash", {})
     provider_name = (provider or settings.llm_provider).lower()
 
     if only_paths is not None:
@@ -118,16 +214,22 @@ def run_extraction(
     else:
         files = list_cv_files(settings.cv_folder)
     res = ExtractResult(found=len(files))
+    excel_rows: list[dict] = []
     log.info("Found %d CV file(s) in %s", len(files), settings.cv_folder)
 
     for i, path in enumerate(files, start=1):
+        try:
+            checkpoint()                 # Pause waits here; Cancel stops here, keeping the CVs already done
+        except RunCancelled:
+            res.cancelled = True
+            break
         if progress:
             progress(i - 1, len(files), path.name)
         if limit is not None and res.extracted >= limit:
             break
         digest = file_sha256(path)
         prev = processed.get(digest)
-        if prev and prev.get("status") == "ok" and not force:
+        if prev and prev.get("status") in ("ok", "skipped") and not force:
             res.skipped_already_done += 1
             continue
 
@@ -138,6 +240,7 @@ def run_extraction(
 
             # Rename the merged PDF after candidate details are extracted.
             final_path = rename_cv_file(path, candidate)
+            _update_manifest_path(manifest_state, digest, final_path)
 
             if text:
                 (text_cache_dir() / f"{digest}.md").write_text(
@@ -148,7 +251,7 @@ def run_extraction(
                 candidate,
                 file_name=final_path.name,
                 file_hash=digest,
-                mail_meta=manifest.get(digest, {}),
+                mail_meta=manifest_entry(manifest, digest),
                 method=method,
                 provider=provider_name,
             )
@@ -161,8 +264,16 @@ def run_extraction(
                 "Success" if s3_uploaded else "Failed"
             )
 
-            # Save candidate details and S3 status to Excel
-            res.total_rows_in_excel = upsert_rows([row])
+            if settings.database_url:
+                # Postgres is the source of truth: store and match the CV before marking it done,
+                # so a database failure leaves it to be retried. The Excel is rebuilt after the run.
+                placement = _store_in_talent_db(candidate, digest, final_path, manifest_entry(manifest, digest),
+                                                method, provider_name, s3_uploaded, row["Education"])
+                res.placements[digest] = placement
+                excel_rows.append(row)
+            else:
+                # Save candidate details and S3 status to Excel
+                res.total_rows_in_excel = upsert_rows([row])
 
             # Save extraction and S3 status in processed_files.json
             processed.set(digest, {
@@ -179,6 +290,14 @@ def run_extraction(
             log.info("  OK  %-30s exp=%s  (%s, %.1fs)", candidate.full_name,
                      candidate.total_experience_years, method, time.time() - t0)
             
+        except PasswordProtected as e:
+            # Not a failure to retry: without the password nobody can read it. Usually not a CV at all.
+            res.skipped_protected += 1
+            processed.set(digest, {
+                "status": "skipped", "file": path.name, "reason": str(e),
+                "at": datetime.now().isoformat(timespec="seconds"),
+            })
+            log.warning("  SKIP %s: %s", path.name, e)
         except Exception as e:  # noqa: BLE001 - one bad CV must not stop the batch
             res.failed += 1
             res.errors[path.name] = str(e)
@@ -191,6 +310,8 @@ def run_extraction(
         finally:
             processed.save()
 
+    if excel_rows:
+        _refresh_excel(res, excel_rows)
     if progress:
         progress(len(files), len(files), "done")
     res.total_rows_in_excel = len(load_candidates())
@@ -247,36 +368,15 @@ def rename_cv_file(path: Path, candidate: Candidate) -> Path:
     return new_path
 
 
-def upload_cv_to_s3(path: Path) -> bool:
-    """Upload the final, renamed PDF while preserving its local folder path."""
-
-    bucket = os.getenv("AWS_S3_BUCKET", "").strip()
-    region = os.getenv("AWS_REGION", "").strip() or None
-    prefix = os.getenv("AWS_S3_PREFIX", "cvs").strip("/")
-
-    if not bucket:
-        log.error("AWS_S3_BUCKET is not configured.")
-        return False
-
+def _update_manifest_path(manifest_state: JsonState, digest: str, final_path: Path) -> None:
+    """Keep the register pointing at the renamed file, so the fetcher's duplicate check finds it."""
+    entry = manifest_entry(manifest_state.get("by_hash", {}), digest)
+    if not entry:
+        return
     try:
-        # Preserve the folder hierarchy beneath data/cvs.
-        relative_path = path.relative_to(settings.cv_folder)
-        key = "/".join(
-            part for part in (prefix, relative_path.as_posix()) if part
-        )
-
-        s3 = boto3.client("s3", region_name=region)
-
-        s3.upload_file(
-            str(path),
-            bucket,
-            key,
-            ExtraArgs={"ContentType": "application/pdf"},
-        )
-
-        log.info("S3 upload successful: s3://%s/%s", bucket, key)
-        return True
-
-    except Exception:
-        log.exception("S3 upload failed for %s", path)
-        return False    
+        relative_path = str(final_path.relative_to(settings.cv_folder))
+    except ValueError:
+        relative_path = str(final_path)
+    if entry.get("file") != relative_path:
+        entry["file"] = relative_path
+        manifest_state.save()

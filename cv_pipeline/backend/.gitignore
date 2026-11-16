@@ -1,4 +1,9 @@
 .env
+# Copies of .env hold real keys too (e.g. envv, .env.backup). Only the example is committed.
+.env.*
+!.env.example
+envv
+*.env
 venv/
 .venv/
 __pycache__/

@@ -15,7 +15,22 @@ from dotenv import load_dotenv
 
 # backend/ folder (this file is backend/app/core/config.py)
 BASE_DIR = Path(__file__).resolve().parents[2]
-load_dotenv(BASE_DIR / ".env")
+ENV_FILE = BASE_DIR / ".env"
+load_dotenv(ENV_FILE)
+
+# Older names some .env files use. boto3 only reads the AWS_ names, so copy them across.
+LEGACY_NAMES = {"AWS_ACCESS_KEY_ID": "S3_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY": "S3_SECRET_ACCESS_KEY",
+                "AWS_S3_BUCKET": "S3_BUCKET_NAME"}
+
+
+def apply_legacy_names(environ) -> None:
+    """Only when the AWS_ name is absent: a deliberately blank value stays blank."""
+    for name, legacy in LEGACY_NAMES.items():
+        if environ.get(name) is None and environ.get(legacy):
+            environ[name] = environ[legacy]
+
+
+apply_legacy_names(os.environ)
 
 
 def _csv(name: str) -> list[str]:
@@ -57,6 +72,27 @@ class Settings:
     output_excel: Path = field(default_factory=lambda: _path("OUTPUT_EXCEL", "data/output/candidates.xlsx"))
     state_folder: Path = field(default_factory=lambda: _path("STATE_FOLDER", "data/state"))
     jobs_folder: Path = field(default_factory=lambda: _path("JOBS_FOLDER", "data/jobs"))
+
+    # Talent database, e.g. postgresql+psycopg://talent:password@localhost:5432/talent
+    database_url: str = field(default_factory=lambda: os.getenv("DATABASE_URL", "").strip())
+
+    # Talent Pool login (same rules as the CRM)
+    session_ttl_hours: int = field(default_factory=lambda: int(os.getenv("SESSION_TTL_HOURS", "12")))
+    admin_session_minutes: int = field(default_factory=lambda: int(os.getenv("ADMIN_SESSION_MINUTES", "30")))
+    admin_max_failed_attempts: int = field(default_factory=lambda: int(os.getenv("ADMIN_MAX_FAILED_ATTEMPTS", "5")))
+    admin_lockout_minutes: int = field(default_factory=lambda: int(os.getenv("ADMIN_LOCKOUT_MINUTES", "15")))
+    password_min_length: int = field(default_factory=lambda: int(os.getenv("PASSWORD_MIN_LENGTH", "6")))
+    # Browsers only send Secure cookies over HTTPS. Set true whenever the API is served over HTTPS.
+    cookie_secure: bool = field(default_factory=lambda: os.getenv("COOKIE_SECURE", "false").strip().lower() == "true")
+    # Exact frontend origins allowed to call the API with the login cookie.
+    cors_origins: list[str] = field(default_factory=lambda: [
+        o.strip().rstrip("/") for o in os.getenv(
+            "CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if o.strip()])
+
+    # S3 (credentials come from boto3's normal chain, never from here)
+    aws_s3_bucket: str = field(default_factory=lambda: os.getenv("AWS_S3_BUCKET", "").strip())
+    aws_region: str = field(default_factory=lambda: os.getenv("AWS_REGION", "").strip())
+    aws_s3_prefix: str = field(default_factory=lambda: os.getenv("AWS_S3_PREFIX", "cvs").strip().strip("/"))
 
     # Job-fit
     jobfit_workers: int = field(default_factory=lambda: int(os.getenv("JOBFIT_WORKERS", "3")))

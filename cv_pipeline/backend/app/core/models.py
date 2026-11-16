@@ -21,8 +21,33 @@ class Education(BaseModel):
     score: Optional[str] = Field(None, description="CGPA / percentage if mentioned")
 
 
+Sector = Literal["facility_management", "oil_gas", "construction", "marine_shipyard", "healthcare", "other"]
+
+
+class WorkPeriod(BaseModel):
+    """One job. Experience totals are calculated from these by code, never by the LLM."""
+    employer: Optional[str] = Field(None, description="Company or employer name")
+    position: Optional[str] = Field(None, description="Job title in this job")
+    country: Optional[str] = Field(None, description="Country where this job was done, in English (e.g. 'India', 'United Arab Emirates', 'Saudi Arabia'). Use the city to tell the country if only the city is given. null if it can't be told.")
+    sector: Sector = Field(..., description=(
+        "Industry of this job: facility_management (building/facility maintenance, FM services), oil_gas (oil, gas, "
+        "refinery, petrochemical), construction (building, civil, infrastructure projects), marine_shipyard (ships, "
+        "shipyards, offshore vessels, ports), healthcare (hospitals, clinics), or other."))
+    other_sector: Optional[str] = Field(None, description="When sector is 'other': a short industry name, e.g. 'Manufacturing', 'Power plant', 'Hospitality'. Otherwise null.")
+    start_date: Optional[str] = Field(None, description="Start date exactly as precise as the CV: 'YYYY-MM-DD' if the day is given, 'YYYY-MM' if only month and year, 'YYYY' if only the year. null if not given.")
+    end_date: Optional[str] = Field(None, description="End date in the same format, or 'present' if the job is ongoing ('Present', 'Till date', 'Current'). null if not given.")
+
+
 class Candidate(BaseModel):
     full_name: Optional[str] = Field(None, description="Candidate's full name")
+    gender: Optional[Literal["Male", "Female"]] = Field(None, description="Only if the CV or passport states it (e.g. 'Sex: M', 'Gender: Female'). Never guess from the name or photo.")
+    nationality: Optional[str] = Field(None, description="Nationality as stated in the CV or passport, in English (e.g. 'Indian'). null if not stated.")
+    passport_expiry: Optional[str] = Field(None, description="Passport date of expiry, normalised to YYYY-MM-DD. null if not shown.")
+    passport_type: Optional[Literal["ECR", "ECNR"]] = Field(None, description=(
+        "Only from the LAST page of an Indian passport, if that page is included in the document. If it shows "
+        "'Emigration Check Required' (or 'ECR'), return 'ECR'. If the last page is included and does not show it, "
+        "return 'ECNR'. If the passport's last page is not in the document, return null. Never guess."))
+    work_history: list[WorkPeriod] = Field(default_factory=list, description="Every job in the CV and any experience certificates, latest first, with its dates exactly as given.")
     email: Optional[str] = Field(None, description="Primary email address")
     phone: Optional[str] = Field(None, description="Primary phone number with country code if present")
     skills: list[str] = Field(default_factory=list, description="Technical and professional skills, each as a short item (e.g. 'Python', 'SQL', 'Team leadership'). Deduplicated.")
