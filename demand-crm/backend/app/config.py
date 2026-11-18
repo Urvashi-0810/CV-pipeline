@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     # PostgreSQL connection, async driver. Example:
     # postgresql+asyncpg://crm:crm@localhost:5432/crm
-    database_url: str = "postgresql+asyncpg://crm:Nishi1509@localhost:5432/crm"
+    database_url: str = "postgresql+asyncpg://postgres:Admin123@127.0.0.1:5433/demand_crm"
 
     # Login session lifetime (absolute, from login).
     session_ttl_hours: int = 12

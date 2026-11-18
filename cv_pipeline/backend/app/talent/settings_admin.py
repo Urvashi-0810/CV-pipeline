@@ -80,7 +80,7 @@ DEFS = [
     SettingDef("JOBS_FOLDER", "folders", "Job files", "path", "data/jobs", restart=True),
 
     SettingDef("DATABASE_URL", "database", "Database connection", "url", restart=True,
-               help="postgresql+psycopg://user:password@host:5432/talent"),
+               help="postgresql+psycopg://user:password@host:5433/talent"),
     SettingDef("TEST_DATABASE_URL", "database", "Test database (developers)", "url",
                help="Only for running the automated tests. Its name must end in _test."),
 
